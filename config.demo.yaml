@@ -1,0 +1,15 @@
+# Demo config for the command-line tool (the website has its own --demo flag).
+# Start fake stores first:  python -m src.demo.mock_sites
+source:
+  name: Demo Source (Shopify)
+  url: http://localhost:8101
+competitors:
+  - {name: Demo B (Woo), url: "http://localhost:8102"}
+  - {name: Demo C (Custom), url: "http://localhost:8103"}
+  - {name: Demo D (Shopify), url: "http://localhost:8104"}
+  - {name: Demo E (Woo), url: "http://localhost:8105"}
+  - {name: Demo F (Custom), url: "http://localhost:8106"}
+db_url: sqlite:///data/demo.db
+scraping:
+  rate_limit_per_sec: 50
+  cache_dir: data/cache_demo

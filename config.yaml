@@ -1,0 +1,39 @@
+# Replace the example URLs with your real source site and 4-5 competitors.
+source:
+  name: My Store
+  url: https://my-store.example.com
+
+competitors:
+  - name: Competitor A
+    url: https://competitor-a.example.com
+    # facebook_page_id: "1234567890"     # used in Phase 7 (ads)
+    # instagram_handle: competitor_a     # used in Phase 7 (social)
+    # youtube_channel: UCxxxxxxxx        # used in Phase 7 (social)
+  - name: Competitor B
+    url: https://competitor-b.example.com
+
+categories_to_track: []        # e.g. ["headphones", "speakers"]; empty = everything
+max_products_per_site: 200
+country: IN
+currency: INR
+schedule: daily
+match_threshold: 0.85
+db_url: sqlite:///data/competitor_intel.db
+
+scraping:
+  rate_limit_per_sec: 1.0      # max requests per second, per domain
+  timeout_seconds: 20
+  max_retries: 3
+  respect_robots: true
+  cache_dir: data/cache
+  cache_ttl_minutes: 60        # raw responses are kept for debugging; use --fresh to bypass
+
+llm:                           # used in Phase 6
+  provider: gemini             # gemini | groq | openrouter | ollama | claude
+  model: gemini-2.5-flash      # free-tier model names change; check the provider docs
+  api_key_env: GEMINI_API_KEY
+
+alerts:                        # used in Phase 8 (optional)
+  email: null
+  telegram: null
+  price_drop_threshold_pct: 10

@@ -1,0 +1,13 @@
+services:
+  web:
+    build:
+      context: .
+      args:
+        INSTALL_BROWSER: "0"
+    ports:
+      - "127.0.0.1:8000:8000"   # localhost only; there is no login
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

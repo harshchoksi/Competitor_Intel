@@ -1,0 +1,12 @@
+{"products": [
+  {"id": 111, "title": "Sonex HP-100 Headphones", "handle": "sonex-hp-100", "vendor": "Sonex", "product_type": "Headphones",
+   "tags": "bestseller, new",
+   "variants": [
+     {"id": 1, "title": "Black", "sku": "HP-100-B", "price": "2,199.00", "compare_at_price": "2999.00", "available": false},
+     {"id": 2, "title": "White", "sku": "HP-100-W", "price": "1999.00", "compare_at_price": "2499.00", "available": true},
+     {"id": 3, "title": "Red", "sku": "HP-100-R", "price": "2099.00", "compare_at_price": null, "available": true}],
+   "images": [{"src": "https://cdn.example/hp100.jpg"}]},
+  {"id": 222, "title": "Boomer SP-200 Speaker", "handle": "boomer-sp-200", "vendor": "Boomer", "product_type": "Speakers", "tags": [],
+   "variants": [{"id": 4, "title": "Default", "sku": "SP-200", "price": "4499.00", "compare_at_price": "4499.00", "available": false}], "images": []},
+  {"id": 333, "title": "", "handle": "broken", "variants": []}
+]}

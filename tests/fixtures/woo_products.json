@@ -1,0 +1,10 @@
+[
+ {"id": 7, "name": "Auralis HP-300 Headphones", "sku": "HP-300", "permalink": "https://rival1.test/product/hp-300/",
+  "on_sale": true, "is_in_stock": true, "low_stock_remaining": 3, "average_rating": "4.5", "review_count": 120,
+  "categories": [{"name": "Headphones"}], "brands": [{"name": "Auralis"}], "images": [{"src": "https://x/i.jpg"}],
+  "prices": {"price": "529900", "regular_price": "599900", "currency_code": "INR", "currency_minor_unit": 2}},
+ {"id": 8, "name": "Voltix PB-100", "sku": "", "permalink": "https://rival1.test/product/pb-100/",
+  "on_sale": false, "is_in_stock": false, "low_stock_remaining": null, "average_rating": "0", "review_count": 0,
+  "categories": [], "brands": [], "images": [],
+  "prices": {"price": "99900", "regular_price": "99900", "currency_code": "INR", "currency_minor_unit": 2}}
+]

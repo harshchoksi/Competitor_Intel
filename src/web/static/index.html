@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Competitor Price Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>Competitor Price Intelligence</h1>
+      <p class="sub">Enter your store and up to 5 competitors. We read their public product data and compare prices, discounts and stock.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card" id="form-card">
+      <form id="form" autocomplete="off">
+        <label class="field">
+          <span>Your website</span>
+          <input id="source" type="text" placeholder="yourstore.com" required>
+        </label>
+        <div class="field">
+          <span>Competitor websites <small id="comp-count"></small></span>
+          <div id="competitors"></div>
+          <button type="button" class="link" id="add-comp">+ Add competitor</button>
+        </div>
+        <details class="adv">
+          <summary>Options</summary>
+          <div class="row">
+            <label class="field"><span>Max products per site</span><input id="max-products" type="number" min="10" max="500" value="100"></label>
+            <label class="field grow"><span>Only these categories / keywords (comma separated, optional)</span><input id="categories" type="text" placeholder="headphones, speakers"></label>
+          </div>
+          <label class="check"><input type="checkbox" id="use-ai" checked> Write an AI summary with Gemini <small id="ai-hint"></small></label>
+        </details>
+        <p class="hint">Tip: use each store's homepage. We find the products ourselves.</p>
+        <div class="actions">
+          <button type="submit" class="primary" id="go">Analyze</button>
+          <button type="button" class="ghost hidden" id="demo">Fill demo URLs</button>
+          <button type="button" class="ghost hidden" id="bump">Demo: change competitor prices</button>
+        </div>
+        <p class="error hidden" id="form-error" role="alert"></p>
+      </form>
+      <div id="recent" class="recent"></div>
+    </section>
+
+    <section class="card hidden" id="monitors-card">
+      <h2>Monitors</h2>
+      <p class="note">Saved comparisons that re-run automatically while this website is running, and alert you by email or Telegram when something new happens.</p>
+      <div id="monitors"></div>
+    </section>
+
+    <section class="card hidden" id="progress-card" aria-live="polite">
+      <h2 id="progress-title">Analyzing…</h2>
+      <ul id="progress-list" class="progress"></ul>
+    </section>
+
+    <section id="results" class="hidden"></section>
+  </main>
+
+  <footer class="wrap foot">Reads publicly available data only. Make sure your use complies with each site's terms.</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
