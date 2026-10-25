@@ -16,7 +16,7 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1", help="Use 0.0.0.0 only behind authentication/a firewall")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--demo", action="store_true", help="Start 6 fake local stores so you can try the site without live sites")
-    ap.add_argument("--db", default="sqlite:///data/competitor_intel.db")
+    ap.add_argument("--db", default=os.environ.get("DATABASE_URL", "sqlite:///data/competitor_intel.db"))
     args = ap.parse_args()
 
     allow_private = args.demo or os.environ.get("ALLOW_PRIVATE_URLS") == "1"

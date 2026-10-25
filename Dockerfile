@@ -6,6 +6,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 ARG INSTALL_BROWSER=0
 RUN if [ "$INSTALL_BROWSER" = "1" ]; then pip install --no-cache-dir -r requirements-browser.txt && playwright install --with-deps chromium; fi
 COPY . .
+# Create the data directory for SQLite persistence
+RUN mkdir -p /app/data
 EXPOSE 8000
-# There is no login. Only expose this port to people you trust (keep it on localhost or behind a VPN/firewall).
-CMD ["python", "-m", "src.web", "--host", "0.0.0.0", "--port", "8000"]
+# PORT is injected by Railway (and most PaaS). Falls back to 8000 for local Docker use.
+CMD python -m src.web --host 0.0.0.0 --port ${PORT:-8000}
