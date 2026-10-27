@@ -153,18 +153,108 @@ def match_products(
 # Category-level matching (brand-vs-brand)
 # ---------------------------------------------------------------------------
 
-def _infer_category(p: ProductRecord) -> str | None:
-    """Return the best available category label for a product, normalised to title-case."""
-    raw = p.category or None
-    if raw and raw.strip():
+# Types too generic to use as a category label — fall through to tags instead
+_GENERIC_TYPES = {
+    "clothing", "accessories", "apparel", "other", "misc", "product",
+    "gift", "bundle", "set", "collection", "sale", "new",
+}
+# Canonical names for common garment / product keywords
+_NORM_MAP = {
+    "tank": "Tank Top", "tanks": "Tank Top", "cami": "Tank Top", "camisole": "Tank Top",
+    "sleeveless": "Tank Top", "singlet": "Tank Top",
+    "t_shirt": "T-Shirt", "tshirt": "T-Shirt", "tee": "T-Shirt", "tees": "T-Shirt",
+    "legging": "Leggings", "leggings": "Leggings", "tight": "Leggings", "tights": "Leggings",
+    "short": "Shorts", "shorts": "Shorts",
+    "bra": "Sports Bra", "sports_bra": "Sports Bra", "sports bra": "Sports Bra",
+    "hoodie": "Hoodie", "hoody": "Hoodie", "sweatshirt": "Hoodie",
+    "jacket": "Jacket", "track_top": "Jacket", "zip": "Jacket",
+    "jogger": "Joggers", "joggers": "Joggers", "track": "Track Pants", "sweatpants": "Joggers",
+    "vest": "Vest",
+    "top": "Top", "ls_top": "Long Sleeve Top", "ls top": "Long Sleeve Top",
+    "crop": "Crop Top", "crop_top": "Crop Top",
+    "polo": "Polo", "shirt": "Shirt",
+    "dress": "Dress", "skirt": "Skirt",
+    "sock": "Socks", "socks": "Socks",
+    "shoe": "Shoes", "shoes": "Shoes", "trainer": "Shoes", "sneaker": "Shoes",
+    "bag": "Bags", "tote": "Bags", "backpack": "Bags",
+    "bottle": "Water Bottles", "shaker": "Shakers",
+    "protein": "Protein", "whey": "Protein", "creatine": "Creatine",
+    "bcaa": "BCAA", "supplement": "Supplements", "vitamin": "Vitamins",
+    "watch": "Smartwatch", "smartwatch": "Smartwatch",
+    "earphone": "Earphones", "earbud": "Earphones", "headphone": "Headphones",
+    "speaker": "Speakers",
+}
+_HIERARCHY_SEP = re.compile(r"[>|/\\]")
+_TAG_SKIP = re.compile(
+    r"^(\d|>|<|sale|new|%|bestsell|featured|all|deal|offer|latest|afterpay|activity:|akeneo|category-|\d{2}/)",
+    re.I,
+)
+# Keywords that indicate a tag is a garment/product type, not metadata
+_GARMENT_KW = re.compile(
+    r"legging|tight|short|bra|top|jacket|hoodie|vest|jogger|tank|pant|shirt|dress|skirt|sock|shoe|bag|tote|bottle|shaker|protein|whey|creatine|bcaa|watch|earbud|earphone|headphone|speaker",
+    re.I,
+)
+
+
+def _normalize_leaf(raw: str) -> str | None:
+    """Normalize a raw leaf category string to a canonical label."""
+    key = raw.strip().lower().replace("-", "_").replace(" ", "_")
+    if key in _NORM_MAP:
+        return _NORM_MAP[key]
+    # Try space-separated version too
+    key2 = raw.strip().lower()
+    if key2 in _NORM_MAP:
+        return _NORM_MAP[key2]
+    # If not in map and not generic, return title-cased as-is
+    if key not in _GENERIC_TYPES and key2 not in _GENERIC_TYPES and len(raw.strip()) > 2:
         return raw.strip().title()
-    # Fall back to first meaningful tag (skip size/colour/discount tags)
-    _skip = re.compile(r"^\d|sale|new|%|bestsell|featured|all|deal|offer|latest", re.I)
+    return None
+
+
+def _infer_category(p: ProductRecord) -> str | None:
+    """Return the best available category label for a product, normalised.
+
+    Strategy:
+    1. Use product_type — if hierarchical (e.g. Gymshark's "Womens>Apparel>Tops>tanks")
+       extract the most-specific (last) segment and normalize it.
+    2. If product_type is blank or too generic ("Clothing", "Accessories"),
+       fall back to tags: first try to find a tag matching a known garment keyword,
+       then fall back to the first tag that looks like a product type.
+    3. Last resort: scan the product title for known category keywords.
+    """
+    raw = (p.category or "").strip()
+    if raw:
+        # Split on hierarchy separators and take the most specific (last) non-empty part
+        parts = [x.strip() for x in _HIERARCHY_SEP.split(raw) if x.strip()]
+        for leaf in reversed(parts):  # most specific first
+            normalized = _normalize_leaf(leaf)
+            if normalized:
+                return normalized
+
+    # Fall back to tags
     for tag in p.tags:
         tag = tag.strip()
-        if tag and not _skip.match(tag) and len(tag) > 2:
+        if not tag or _TAG_SKIP.search(tag) or len(tag) < 3 or len(tag) > 50:
+            continue
+        # Direct map hit
+        key = tag.lower().replace("-", "_").replace(" ", "_")
+        if key in _NORM_MAP:
+            return _NORM_MAP[key]
+        if tag.lower() in _NORM_MAP:
+            return _NORM_MAP[tag.lower()]
+        # Tag contains a garment keyword → use it as the category
+        if _GARMENT_KW.search(tag):
             return tag.title()
+
+    # Last resort: scan product title for known category keywords
+    title_lower = p.title.lower()
+    # Try multi-word phrases first (e.g. "sports bra" before "bra")
+    for phrase in sorted(_NORM_MAP, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(phrase.replace("_", " ")) + r"\b", title_lower):
+            return _NORM_MAP[phrase]
+
     return None
+
 
 
 def _on_sale_pct(products: list[ProductRecord]) -> float | None:
