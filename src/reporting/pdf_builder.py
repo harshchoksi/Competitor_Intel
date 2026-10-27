@@ -177,9 +177,13 @@ def _kpis(result, S):
     gap = sum(c["avg_gap_pct"] for c in comps) / len(comps) if comps else None
     position = "n/a" if gap is None else (f"{abs(gap):.1f}% {'lower' if gap > 0 else 'higher'}")
     warnings = sum(1 for a in result["alerts"] if a["level"] == "warning")
+    cat_comps = result.get("category_comparisons", {})
+    total_cat = sum(len(v) for v in cat_comps.values())
     cells = [(str(src["product_count"]), "of your products read"), (str(matched), "matched product comparisons"),
-             (position, "your prices vs competitors (average)"), (str(warnings), "price-undercut warnings")]
-    t = Table([[Paragraph(v, S["kpi"]) for v, _ in cells], [Paragraph(esc(lab), S["kpil"]) for _, lab in cells]], colWidths=[CONTENT_W / 4] * 4)
+             (position, "your prices vs competitors (average)"), (str(warnings), "price-undercut warnings"),
+             (str(total_cat), "category comparisons")]
+    n = len(cells)
+    t = Table([[Paragraph(v, S["kpi"]) for v, _ in cells], [Paragraph(esc(lab), S["kpil"]) for _, lab in cells]], colWidths=[CONTENT_W / n] * n)
     t.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.5, LINE), ("INNERGRID", (0, 0), (-1, -1), 0.5, LINE), ("BACKGROUND", (0, 0), (-1, -1), ZEBRA),
                            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (0, 0), 8), ("BOTTOMPADDING", (0, 1), (-1, 1), 8)]))
     return t
@@ -427,6 +431,45 @@ def build_pdf(result: dict, meta: dict | None = None) -> bytes:
               _price_table(result, S)]
     if len(result["rows"]) > 120:
         story.append(Paragraph(f"Showing 120 of {len(result['rows'])} matched products.", S["caption"]))
+    # Category comparison appendix - critical for brand-vs-brand with 0 product matches
+    cat_data = result.get("category_comparisons", {})
+    all_cat_rows = [(k, v) for k, v in cat_data.items() if v]
+    if all_cat_rows:
+        story += [Spacer(1, 6 * mm), CondPageBreak(60 * mm),
+                  Paragraph(f"Appendix {next(letters)}: Category comparison", S["H1"]),
+                  Paragraph(
+                      "Compares average prices per shared product category. "
+                      "Useful for brand-vs-brand analysis where individual product names differ. "
+                      "Orange = competitor cheaper, blue = competitor more expensive.",
+                      S["caption"])]
+        for comp_key, cat_rows in all_cat_rows:
+            comp_name = next((c["name"] for c in result["competitors"] if c["key"] == comp_key), comp_key)
+            if len(all_cat_rows) > 1:
+                story.append(Paragraph(f"vs {esc(comp_name)}", S["H2"]))
+            hdr = [Paragraph(h, S["cellb"]) for h in (
+                "Category", "Your prods", "Their prods",
+                "Your avg", "Their avg", "Gap", "On sale Y/T")]
+            tdata = [hdr]
+            for m in cat_rows:
+                gp = m.get("price_gap_pct")
+                gap_str = "–" if gp is None else f"{'+' if gp > 0 else ''}{gp:.1f}%"
+                gap_note = "" if gp is None else (" pricier" if gp > 0 else " cheaper")
+                sale_s = m.get("source_on_sale_pct")
+                sale_c = m.get("comp_on_sale_pct")
+                sale_str = "–" if sale_s is None else (f"{sale_s:.0f}%/{sale_c:.0f}%" if sale_c is not None else f"{sale_s:.0f}%")
+                gap_color = "#D55E00" if gp is not None and gp < -1 else "#0072B2" if gp is not None and gp > 1 else "#5d6678"
+                tdata.append([
+                    Paragraph(esc(m["category"]), S["cell"]),
+                    Paragraph(str(m["source_count"]), S["cell"]),
+                    Paragraph(str(m["comp_count"]), S["cell"]),
+                    Paragraph(inr(m["source_avg_price"]), S["cell"]),
+                    Paragraph(inr(m["comp_avg_price"]), S["cell"]),
+                    Paragraph(f'<font color="{gap_color}"><b>{esc(gap_str)}</b></font>{esc(gap_note)}', S["cell"]),
+                    Paragraph(sale_str, S["cell"]),
+                ])
+            cw = CONTENT_W / 7
+            story.append(_table(tdata, [cw * 1.6, cw * 0.75, cw * 0.75, cw, cw, cw * 0.95, cw * 0.95]))
+
     if result["review_matches"]:
         story += [Spacer(1, 6 * mm), CondPageBreak(60 * mm), Paragraph(f"Appendix {next(letters)}: Possible matches to double-check", S["H1"]),
                   Paragraph("Similar-looking pairs that were not confident enough to include in the comparison.", S["caption"])]
