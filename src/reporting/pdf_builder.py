@@ -173,13 +173,12 @@ def _chart(co: ChartOut | None, S, max_h=105 * mm):
 def _kpis(result, S):
     src = result["sites"][result["source_key"]]
     comps = [c for c in result["competitors"] if c["matched"]]
-    matched = sum(c["matched"] for c in comps)
     gap = sum(c["avg_gap_pct"] for c in comps) / len(comps) if comps else None
     position = "n/a" if gap is None else (f"{abs(gap):.1f}% {'lower' if gap > 0 else 'higher'}")
     warnings = sum(1 for a in result["alerts"] if a["level"] == "warning")
     cat_comps = result.get("category_comparisons", {})
     total_cat = sum(len(v) for v in cat_comps.values())
-    cells = [(str(src["product_count"]), "of your products read"), (str(matched), "matched product comparisons"),
+    cells = [(str(src["product_count"]), "of your products read"),
              (position, "your prices vs competitors (average)"), (str(warnings), "price-undercut warnings"),
              (str(total_cat), "category comparisons")]
     n = len(cells)
@@ -426,11 +425,6 @@ def build_pdf(result: dict, meta: dict | None = None) -> bytes:
 
     # ---- appendices
     letters = iter("ABCDEF")
-    story += [Paragraph(f"Appendix {next(letters)}: Matched product prices", S["H1"]),
-              Paragraph("Percent shows the competitor's price relative to yours. Orange = cheaper than you, blue = costlier. “out” = out of stock, “low” = low-stock flag.", S["caption"]),
-              _price_table(result, S)]
-    if len(result["rows"]) > 120:
-        story.append(Paragraph(f"Showing 120 of {len(result['rows'])} matched products.", S["caption"]))
     # Category comparison appendix - critical for brand-vs-brand with 0 product matches
     cat_data = result.get("category_comparisons", {})
     all_cat_rows = [(k, v) for k, v in cat_data.items() if v]
