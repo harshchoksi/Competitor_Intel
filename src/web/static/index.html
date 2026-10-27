@@ -33,6 +33,13 @@
             <label class="field"><span>Max products per site</span><input id="max-products" type="number" min="10" max="500" value="100"></label>
             <label class="field grow"><span>Only these categories / keywords (comma separated, optional)</span><input id="categories" type="text" placeholder="headphones, speakers"></label>
           </div>
+          <div class="row" style="align-items:center;gap:14px;margin-top:6px">
+            <label class="field" style="min-width:260px">
+              <span>Match threshold &nbsp;<small id="threshold-display" style="font-weight:600;color:var(--accent)">85%</small></span>
+              <input id="match-threshold" type="range" min="30" max="100" value="85" step="5" style="width:100%;accent-color:var(--accent)">
+            </label>
+            <p class="note" style="margin:0;flex:1">Lower for brand-vs-brand (try 50%). Higher = stricter exact-product matching.</p>
+          </div>
           <label class="check"><input type="checkbox" id="use-ai" checked> Write an AI summary with Gemini <small id="ai-hint"></small></label>
         </details>
         <p class="hint">Tip: use each store's homepage. We find the products ourselves.</p>

@@ -42,6 +42,8 @@ function refreshCount() {
 function showError(msg) { const e = $("#form-error"); e.textContent = msg || ""; e.classList.toggle("hidden", !msg); }
 
 $("#add-comp").addEventListener("click", () => addCompetitor());
+// Threshold slider live display
+$("#match-threshold").addEventListener("input", e => { $("#threshold-display").textContent = e.target.value + "%"; });
 $("#demo").addEventListener("click", () => {
   $("#source").value = "localhost:8101";
   $("#competitors").innerHTML = "";
@@ -56,6 +58,7 @@ $("#form").addEventListener("submit", async ev => {
   const body = {
     source_url: $("#source").value.trim(), competitor_urls: comps,
     max_products: parseInt($("#max-products").value, 10) || 100,
+    match_threshold: (parseInt($("#match-threshold").value, 10) || 85) / 100,
     categories: $("#categories").value.split(",").map(s => s.trim()).filter(Boolean),
     use_ai: $("#use-ai").checked,
   };
@@ -178,6 +181,7 @@ function renderResults(r) {
     options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true, title: { display: true, text: "Products" } } } } });
 
   root.append(priceTable(r, comps));
+  const catComp = categoryCard(r, comps); if (catComp) root.append(catComp);
   root.append(changesCard(r, colorOf));
   const off = offersCard(r); if (off) root.append(off);
   root.append(marketingCard(r));
@@ -259,6 +263,43 @@ function dataQuality(r) {
     ), r.coverage && Object.keys(r.coverage).length ? h("p", { class: "note" }, "Coverage: " + Object.values(r.coverage).map(c => `${c.name} matched ${c.source_products_matched}/${c.source_products} of your products`).join("; ")) : null);
 }
 
+
+// ---------- Category Comparison card (brand-vs-brand) ----------
+function categoryCard(r, comps) {
+  const catData = r.category_comparisons || {};
+  // flatten: [{comp, category, ...}]
+  const rows = [];
+  comps.forEach(c => {
+    (catData[c.key] || []).forEach(m => rows.push({ comp: c.name, compKey: c.key, ...m }));
+  });
+  if (!rows.length) return null;
+
+  const gap = n => n == null ? "–" : (n > 0 ? "+" : "") + n.toFixed(1) + "%";
+  const gapCls = n => n == null ? "" : n < -1 ? "cheap" : n > 1 ? "dear" : "";
+
+  const tbody = h("tbody");
+  rows.forEach(m => {
+    tbody.append(h("tr", {},
+      h("td", {}, m.category),
+      h("td", {}, comps.length > 1 ? m.comp : null),
+      h("td", { class: "num" }, m.source_count),
+      h("td", { class: "num" }, m.comp_count),
+      h("td", { class: "num" }, inr(m.source_avg_price)),
+      h("td", { class: "num" }, inr(m.comp_avg_price)),
+      h("td", { class: "num " + gapCls(m.price_gap_pct) }, gap(m.price_gap_pct),
+        h("small", {}, m.price_gap_pct != null ? (m.price_gap_pct > 0 ? " (they're pricier)" : " (they're cheaper)") : "")),
+      h("td", { class: "num" }, m.source_on_sale_pct != null ? m.source_on_sale_pct + "% / " + (m.comp_on_sale_pct ?? "–") + "%" : "–"),
+    ));
+  });
+
+  return h("div", { class: "card" },
+    h("h2", {}, "Category comparison"),
+    h("p", { class: "note" }, "Compares average prices across shared product categories — useful when both brands sell similar items with different names."),
+    h("div", { class: "tablewrap" }, h("table", {},
+      h("thead", {}, h("tr", {},
+        ["Category", comps.length > 1 ? "Competitor" : null, "Your products", "Their products", "Your avg price", "Their avg price", "Price gap", "On sale (yours / theirs)"].filter(Boolean).map(x => h("th", {}, x)))),
+      tbody)));
+}
 
 // ---------- AI summary, changes, offers, marketing, monitors ----------
 function aiCard(r) {

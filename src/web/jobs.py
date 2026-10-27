@@ -50,6 +50,7 @@ def build_config(source_url: str, competitor_urls: list[str], options: dict, cac
         "source": {"name": site_label(source_url), "url": source_url},
         "competitors": [{"name": site_label(u), "url": u} for u in competitor_urls],
         "max_products_per_site": options.get("max_products", 100),
+        "match_threshold": options.get("match_threshold", 0.85),
         "categories_to_track": options.get("categories", []),
         "scraping": {"rate_limit_per_sec": options.get("rate_limit_per_sec", 1.0), "cache_ttl_minutes": 10, "cache_dir": cache_dir},
     })

@@ -5,7 +5,7 @@ import statistics
 from datetime import UTC, datetime
 
 from src.ads.links import ad_library_links
-from src.analysis.matching import Match, match_products
+from src.analysis.matching import CategoryMatch, Match, match_by_category, match_products
 from src.analysis.types import SiteData
 from src.scrapers.base import ProductRecord
 
@@ -316,6 +316,7 @@ def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_al
         ],
         "comparison_available": source.status == "ok" and bool(ok_comps),
         "rows": [], "competitors": [], "alerts": [], "insights": [], "review_matches": [], "coverage": {},
+        "category_comparisons": {},
         "signals": {sd.key: sd.signals for sd in sites if sd.signals},
         "social": {sd.key: {"links": (sd.signals or {}).get("social_links", {}), "youtube": (sd.social or {}).get("youtube")} for sd in sites if sd.signals or sd.social},
         "ad_links": {sd.key: ad_library_links(sd.name, ((sd.signals or {}).get("social_links", {}).get("facebook") or {}).get("handle")) for sd in sites},
@@ -325,6 +326,29 @@ def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_al
         return result
 
     matches = {c.key: match_products(source.products, c.products, match_threshold) for c in ok_comps}
+    # Category-level comparison (works for brand-vs-brand with different product names)
+    result["category_comparisons"] = {
+        c.key: [
+            {
+                "category": m.category,
+                "source_count": m.source_count,
+                "comp_count": m.comp_count,
+                "source_avg_price": m.source_avg_price,
+                "comp_avg_price": m.comp_avg_price,
+                "source_min_price": m.source_min_price,
+                "comp_min_price": m.comp_min_price,
+                "source_max_price": m.source_max_price,
+                "comp_max_price": m.comp_max_price,
+                "price_gap_pct": m.price_gap_pct,
+                "source_on_sale_pct": m.source_on_sale_pct,
+                "comp_on_sale_pct": m.comp_on_sale_pct,
+                "source_products": m.source_products,
+                "comp_products": m.comp_products,
+            }
+            for m in match_by_category(source.products, c.products)
+        ]
+        for c in ok_comps
+    }
     rows, per_comp = compare(source, ok_comps, matches)
     failed = [c for c in comps if c.status != "ok"]
     result["rows"] = rows

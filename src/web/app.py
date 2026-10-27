@@ -42,6 +42,7 @@ class AnalysisRequest(BaseModel):
     source_url: str
     competitor_urls: list[str] = Field(min_length=1, max_length=5)
     max_products: int = Field(default=100, ge=10, le=500)
+    match_threshold: float = Field(default=0.85, ge=0.3, le=1.0)
     categories: list[str] = Field(default_factory=list, max_length=10)
     use_ai: bool = True
 
@@ -123,7 +124,7 @@ def create_app(
         if len(set(labels)) != len(labels):
             raise HTTPException(422, "Each URL must be a different website (duplicates found)")
         cats = [c.strip() for c in req.categories if c.strip()]
-        return source, comps, {"max_products": req.max_products, "categories": cats, "use_ai": req.use_ai}
+        return source, comps, {"max_products": req.max_products, "categories": cats, "use_ai": req.use_ai, "match_threshold": req.match_threshold}
 
     @app.post("/api/analyses", status_code=202)
     def create_analysis_endpoint(req: AnalysisRequest) -> dict:
