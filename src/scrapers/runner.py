@@ -1,18 +1,20 @@
 """Orchestrates detect -> scrape (with fallback chain) -> persist, isolating failures per site."""
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from loguru import logger
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.config import AppConfig, ScrapingSettings, SiteConfig
 from src.db.models import Offer, PriceSnapshot, Product, Run, ScrapeLog, Site, VariantSnapshot, utcnow
-from src.db.session import session_scope
+from src.db.session import PG_WRITE_LOCK, session_scope
 from src.scrapers.base import BaseScraper, ProductRecord, ScrapeError
 from src.scrapers.browser import BrowserScraper, browser_enabled
 from src.scrapers.detector import DetectionResult, Platform, detect_platform
@@ -77,6 +79,8 @@ def _scrape_products(site: SiteConfig, is_source: bool, cfg: AppConfig, client: 
         result.currency = detection.currency
         logger.info("{}: detected {} ({})", site.name, detection.platform.value, "; ".join(detection.evidence))
         errors: list[str] = []
+        if detection.platform in (Platform.SHOPIFY, Platform.WOOCOMMERCE) and not detection.feed_available:
+            result.warnings.append(f"the fast {detection.platform.value} product feed was not reachable from this server, so products are read page by page (slow, may be partial)")
         chain = build_chain(detection, cfg.scraping)
         for scraper_cls in chain:
             scraper = scraper_cls(client, site, cfg)
@@ -106,12 +110,28 @@ def _scrape_products(site: SiteConfig, is_source: bool, cfg: AppConfig, client: 
     return result
 
 
+# One writer at a time per process. Two analyses saving the same website at once (e.g. a second click while the first is still
+# running, or a scheduled monitor) both see "site not in the database yet" and both insert it: the second one crashes with
+# "duplicate key value violates unique constraint sites_key_key". Saving is quick, scraping is the slow part, so this costs nothing.
+_PERSIST_LOCK = threading.Lock()
+
+
+def _cl(model, column: str, value):
+    """Clip text to the column's VARCHAR length. SQLite ignores lengths, Postgres rejects the whole save ("value too long")."""
+    if isinstance(value, str):
+        n = model.__table__.columns[column].type.length
+        if n and len(value) > n:
+            return value[:n]
+    return value
+
+
 def _get_or_create_site(session: Session, res: SiteResult) -> Site:
-    s = session.scalar(select(Site).where(Site.key == res.site.key))
+    key = _cl(Site, "key", res.site.key)
+    s = session.scalar(select(Site).where(Site.key == key))
     if s is None:
-        s = Site(key=res.site.key, name=res.site.name, url=res.site.url, is_source=res.is_source)
+        s = Site(key=key, name=_cl(Site, "name", res.site.name), url=_cl(Site, "url", res.site.url), is_source=res.is_source)
         session.add(s)
-    s.url, s.is_source = res.site.url, res.is_source
+    s.url, s.is_source = _cl(Site, "url", res.site.url), res.is_source
     s.facebook_page_id, s.instagram_handle, s.youtube_channel = (
         res.site.facebook_page_id, res.site.instagram_handle, res.site.youtube_channel,
     )
@@ -122,6 +142,9 @@ def _get_or_create_site(session: Session, res: SiteResult) -> Site:
 
 
 def persist_result(session: Session, run_id: int, res: SiteResult) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        # also serialises writers across several server processes; released automatically at commit
+        session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": PG_WRITE_LOCK})
     site = _get_or_create_site(session, res)
     now = utcnow()
     session.add(
@@ -131,33 +154,41 @@ def persist_result(session: Session, run_id: int, res: SiteResult) -> None:
         )
     )
     for o in (res.signals or {}).get("offers", []):
-        session.add(Offer(site_id=site.id, run_id=run_id, type=o["type"], text=o["text"], code=o.get("code"), discount_value=o.get("discount_value"), detected_at=now))
+        session.add(Offer(site_id=site.id, run_id=run_id, type=_cl(Offer, "type", o["type"]), text=o["text"], code=_cl(Offer, "code", o.get("code")),
+                          discount_value=o.get("discount_value"), detected_at=now))
     if res.status != "ok":
         return
-    existing = {p.external_id: p for p in session.scalars(select(Product).where(Product.site_id == site.id))}
+    # one row per product id (a scraper can return the same id twice; the database allows one price snapshot per product per run)
+    unique: dict[str, ProductRecord] = {}
     for rec in res.products:
-        prod = existing.get(rec.external_id)
+        unique.setdefault(_cl(Product, "external_id", rec.external_id), rec)
+    existing = {p.external_id: p for p in session.scalars(select(Product).where(Product.site_id == site.id))}
+    pairs: list[tuple[Product, ProductRecord]] = []
+    for ext, rec in unique.items():
+        prod = existing.get(ext)
         if prod is None:
-            prod = Product(site_id=site.id, external_id=rec.external_id, first_seen_at=now)
+            prod = Product(site_id=site.id, external_id=ext, first_seen_at=now)
             session.add(prod)
-            existing[rec.external_id] = prod
-        prod.url, prod.title, prod.brand = rec.url, rec.title, rec.brand
-        prod.sku, prod.gtin, prod.mpn = rec.sku, rec.gtin, rec.mpn
-        prod.category, prod.image_url, prod.tags = rec.category, rec.image_url, rec.tags
+        prod.url, prod.title, prod.brand = _cl(Product, "url", rec.url), _cl(Product, "title", rec.title) or "", _cl(Product, "brand", rec.brand)
+        prod.sku, prod.gtin, prod.mpn = _cl(Product, "sku", rec.sku), _cl(Product, "gtin", rec.gtin), _cl(Product, "mpn", rec.mpn)
+        prod.category, prod.image_url, prod.tags = _cl(Product, "category", rec.category), _cl(Product, "image_url", rec.image_url), rec.tags
         prod.last_seen_at = now
-        session.flush()
+        pairs.append((prod, rec))
+    session.flush()  # ONE batched INSERT for all new products (was one round trip per product)
+    for prod, rec in pairs:
         session.add(
             PriceSnapshot(
                 product_id=prod.id, run_id=run_id, price=rec.price, compare_at_price=rec.compare_at_price,
-                currency=rec.currency, in_stock=rec.in_stock, low_stock_flag=rec.low_stock,
+                currency=_cl(PriceSnapshot, "currency", rec.currency), in_stock=rec.in_stock, low_stock_flag=rec.low_stock,
                 is_preorder=rec.is_preorder, rating=rec.rating, review_count=rec.review_count, scraped_at=now,
             )
         )
         for v in rec.variants:
             session.add(
                 VariantSnapshot(
-                    product_id=prod.id, run_id=run_id, variant_external_id=v.external_id, title=v.title,
-                    sku=v.sku, price=v.price, compare_at_price=v.compare_at_price, available=v.available,
+                    product_id=prod.id, run_id=run_id, variant_external_id=_cl(VariantSnapshot, "variant_external_id", v.external_id),
+                    title=_cl(VariantSnapshot, "title", v.title), sku=_cl(VariantSnapshot, "sku", v.sku), price=v.price,
+                    compare_at_price=v.compare_at_price, available=v.available,
                 )
             )
 
@@ -201,12 +232,21 @@ def run_scrape(
                 logger.exception("progress callback failed")
 
     def finish(res: SiteResult) -> None:
-        try:
-            with session_scope(engine) as s:
-                persist_result(s, run_id, res)
-        except Exception as exc:
-            logger.exception("{}: could not save results", res.site.name)
-            res.status, res.error = "failed", f"database error: {exc}"
+        for attempt in (1, 2):
+            try:
+                with _PERSIST_LOCK, session_scope(engine) as s:
+                    persist_result(s, run_id, res)
+                break
+            except IntegrityError:
+                if attempt == 2:  # another process won the race twice; report it instead of hiding it
+                    logger.exception("{}: could not save results", res.site.name)
+                    res.status, res.error = "failed", "database busy: could not save results, please run the analysis again"
+                else:
+                    logger.warning("{}: save collided with another writer, retrying once", res.site.name)
+            except Exception as exc:
+                logger.exception("{}: could not save results", res.site.name)
+                res.status, res.error = "failed", f"database error: {str(exc).splitlines()[0][:300]}"
+                break
         emit("done", res.site.key, res)
 
     by_key: dict[str, SiteResult] = {}

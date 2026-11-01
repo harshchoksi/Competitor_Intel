@@ -231,10 +231,13 @@ def parse_sitemap(xml_text: str) -> tuple[str, list[str]]:
     if root is None:
         return "unknown", []
     kind = etree.QName(root).localname.lower()
+    # Only the page address of each <url> / <sitemap>. Shopify and other sitemaps also nest <image:loc> / <video:loc> inside every
+    # <url>; counting those made the crawler download every product image as if it were a product page.
     locs = [
         (el.text or "").strip()
         for el in root.iter()
         if isinstance(el.tag, str) and etree.QName(el).localname == "loc" and (el.text or "").strip()
+        and el.getparent() is not None and etree.QName(el.getparent()).localname in ("url", "sitemap")
     ]
     return ("index" if kind == "sitemapindex" else "urlset" if kind == "urlset" else "unknown"), locs
 
@@ -273,7 +276,7 @@ class JsonLdScraper(BaseScraper):
             elif kind == "urlset":
                 is_product_map = "product" in sm.lower()
                 for loc in locs:
-                    if loc.lower().endswith(IMAGE_EXT):
+                    if loc.lower().split("?")[0].endswith(IMAGE_EXT):  # query strings (".jpg?v=123") used to slip past this check
                         continue
                     if is_product_map:
                         product_urls.append(loc)
@@ -286,7 +289,7 @@ class JsonLdScraper(BaseScraper):
 
     def fetch_page(self, url: str) -> tuple[str, str] | None:
         """Return (html, final_url). Overridden by the browser scraper to render JavaScript."""
-        res = self.client.get(url)
+        res = self.client.get(url, use_cache=False)  # product pages are never re-read within a run; caching them only filled the disk
         return (res.text, res.url) if res is not None and res.ok else None
 
     def _homepage_links(self) -> list[str]:

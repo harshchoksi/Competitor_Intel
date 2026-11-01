@@ -1,10 +1,12 @@
 """Background analysis pipeline: scrape -> match -> metrics -> store result for the website."""
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -48,6 +50,21 @@ def site_label(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def is_hosted() -> bool:
+    """True on Render / Railway / Fly etc. (they set these variables), or when HOSTED=1. Hosted servers are small and shared,
+    so they get tighter time budgets than your own computer."""
+    return bool(os.environ.get("RENDER") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("FLY_APP_NAME") or os.environ.get("HOSTED") == "1")
+
+
+def site_time_budget_minutes() -> float:
+    """Longest we spend reading ONE website before using what we have. Override with SITE_TIME_BUDGET_MINUTES."""
+    raw = os.environ.get("SITE_TIME_BUDGET_MINUTES", "").strip()
+    try:
+        return float(raw) if raw else (10.0 if is_hosted() else 45.0)
+    except ValueError:
+        return 10.0 if is_hosted() else 45.0
+
+
 def build_config(source_url: str, competitor_urls: list[str], options: dict, cache_dir: str = "data/cache") -> AppConfig:
     return AppConfig.model_validate({
         "source": {"name": site_label(source_url), "url": source_url},
@@ -56,7 +73,8 @@ def build_config(source_url: str, competitor_urls: list[str], options: dict, cac
         "match_threshold": options.get("match_threshold", 0.80),
         "categories_to_track": options.get("categories", []),
         **({"currency": options["currency"]} if options.get("currency") else {}),
-        "scraping": {"rate_limit_per_sec": options.get("rate_limit_per_sec", 2.0), "cache_ttl_minutes": 10, "cache_dir": cache_dir},
+        "scraping": {"rate_limit_per_sec": options.get("rate_limit_per_sec", 2.0), "cache_ttl_minutes": 10, "cache_dir": cache_dir,
+                     "max_site_minutes": site_time_budget_minutes()},
     })
 
 
@@ -65,6 +83,25 @@ def pricing_options_from(options: dict) -> PricingOptions:
     return PricingOptions(
         tolerance_pct=float(options.get("tolerance_pct", d.tolerance_pct)), max_increase_pct=float(options.get("max_increase_pct", d.max_increase_pct)),
         undercut_pct=float(options.get("undercut_pct", d.undercut_pct)), exclude_out_of_stock=bool(options.get("exclude_out_of_stock", d.exclude_out_of_stock)))
+
+
+def recover_interrupted_analyses(engine: Engine) -> int:
+    """Analyses run in threads inside the web process. When the process dies (out of memory, redeploy, a free plan going to
+    sleep) those threads die with it but the database still says 'running', so the page waits forever. At startup nothing of
+    ours can still be running, so mark such rows failed with a clear message. Also removes cache folders left behind."""
+    with session_scope(engine) as s:
+        stuck = list(s.scalars(select(Analysis).where(Analysis.status.in_(("queued", "running")))))
+        for a in stuck:
+            a.status, a.finished_at = "failed", utcnow()
+            a.error = "The server restarted while this analysis was running (this happens when a hosted server runs out of memory, is redeployed or goes to sleep). Please run it again."
+    cache = Path("data/cache")
+    if cache.is_dir():
+        for d in cache.iterdir():
+            if d.is_dir() and time.time() - d.stat().st_mtime > 1800:
+                shutil.rmtree(d, ignore_errors=True)
+    if stuck:
+        logger.warning("marked {} interrupted analysis(es) as failed", len(stuck))
+    return len(stuck)
 
 
 def _update(engine: Engine, analysis_id: str, **fields) -> None:
@@ -130,6 +167,7 @@ def execute_analysis(analysis_id: str, engine: Engine, client_factory: ClientFac
                     last_write[0] = now
                 elif event == "start":
                     entry["state"], entry["message"] = "scraping", "Reading products..."
+                    entry["started_at"] = time.time()
                 elif res is not None:
                     entry["state"] = "done" if res.status == "ok" else "failed"
                     entry["products"] = len(res.products)

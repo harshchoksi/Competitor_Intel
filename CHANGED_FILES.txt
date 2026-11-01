@@ -1,0 +1,12 @@
+Backend changes (your UI files app.js / pricing.js / style.css / index.html are untouched):
+  src/db/session.py            Postgres URL fix, pooling, WAL, advisory locks, sequence repair
+  src/scrapers/runner.py       write lock + retry, de-dupe, clip lengths, batched inserts, slow-feed warning
+  src/scrapers/jsonld.py       sitemap no longer crawls images; page bodies not cached
+  src/scrapers/http.py         Retry-After honoured, no caching of images/huge files
+  src/web/jobs.py              hosted time budgets, restart recovery, cache cleanup
+  src/web/app.py               lazy PDF import, worker count
+  src/llm/gemini.py            30 s timeout (env GEMINI_TIMEOUT_SECONDS)
+  src/llm/match_verify.py      AI check: stop after first failure / 60 s budget
+  tests/test_deploy_hardening.py   new (22 tests; 2 need TEST_DATABASE_URL)
+  Dockerfile, render.yaml (new), DEPLOY_RENDER.md (new), README.md
+  setup.sh / run.sh / setup.bat / run.bat   (new) one-command local setup and start

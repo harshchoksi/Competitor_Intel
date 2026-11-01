@@ -1,0 +1,28 @@
+# Render Blueprint: New > Blueprint > pick this repo. Edit `plan` to taste; see DEPLOY_RENDER.md for why these values.
+databases:
+  - name: competitor-intel-db
+    plan: basic-256mb        # free Postgres is deleted after 30 days; any paid size keeps your history
+    databaseName: competitor_intel
+
+services:
+  - type: web
+    name: competitor-intel
+    runtime: docker
+    plan: standard           # 2 GB RAM / 1 vCPU. "starter" (512 MB / 0.5 vCPU) works for small sites; "free" (0.1 vCPU) is too slow
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: { name: competitor-intel-db, property: connectionString }
+      - key: WEB_CONCURRENCY      # never raise this: analyses live in one process's memory
+        value: "1"
+      - key: ANALYSIS_WORKERS     # analyses running at the same time (each needs a few hundred MB for big catalogues)
+        value: "1"
+      - key: SITE_TIME_BUDGET_MINUTES   # longest to spend reading ONE website before using what was read so far
+        value: "10"
+      - key: GEMINI_TIMEOUT_SECONDS
+        value: "30"
+      - key: SEMANTIC_EMBEDDINGS
+        value: "off"
+      - key: GEMINI_API_KEY
+        sync: false                # you enter it in the Render dashboard

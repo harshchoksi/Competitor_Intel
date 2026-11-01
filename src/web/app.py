@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +21,6 @@ from sqlalchemy import Engine, select
 from src.db.models import Analysis, Monitor, utcnow
 from src.db.session import init_db, make_engine, session_scope
 from src.monitoring import Scheduler, create_analysis, start_monitor_run
-from src.reporting.pdf_builder import build_pdf
 from src.social.youtube import client_from_env as youtube_from_env
 from src.web.jobs import (
     ClientFactory,
@@ -29,6 +29,8 @@ from src.web.jobs import (
     default_client_factory,
     default_llm_factory,
     execute_analysis,
+    is_hosted,
+    recover_interrupted_analyses,
     site_label,
 )
 from src.web.security import validate_user_url
@@ -87,13 +89,16 @@ def create_app(
     youtube_factory: YouTubeFactory | None = None,
     allow_private: bool = False,
     run_inline: bool = False,
-    max_workers: int = 2,
+    max_workers: int | None = None,
     scheduler: bool = False,
     scheduler_tick: float = 30.0,
     demo: bool = False,
 ) -> FastAPI:
     engine = engine or make_engine(db_url)
     init_db(engine)
+    if max_workers is None:  # analyses held in memory at once: small hosted instances run out of RAM with more than one
+        max_workers = int(os.environ.get("ANALYSIS_WORKERS") or (1 if is_hosted() else 2))
+    recover_interrupted_analyses(engine)
     factory = client_factory or default_client_factory(allow_private)
     llm = llm_factory or default_llm_factory
     yt = youtube_factory or youtube_from_env
@@ -320,6 +325,10 @@ def create_app(
         if not result or not result.get("comparison_available"):
             raise HTTPException(409, "No report is available because the comparison could not be completed.")
         try:
+            from src.reporting.pdf_builder import (
+                build_pdf,  # imported here: matplotlib/pandas/seaborn cost ~200 MB of RAM and are only needed for PDFs
+            )
+
             pdf = build_pdf(result, meta)
         except Exception as exc:
             logger.exception("report generation failed for {}", analysis_id)

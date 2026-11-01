@@ -40,6 +40,9 @@ Matching is one-to-one per competitor. The **match threshold** slider (default 8
 - **Max products per site** is optional: leave it empty for everything. **Only these product types / keywords** limits the run to e.g. `meat, chicken`.
 - Live progress shows how many products have been found per site. Big catalogues take a while: a generic site needs one request per product page, so 5,000 products at 2 requests/second is about 40 minutes (Shopify/WooCommerce sites are far faster).
 
+## Hosting (Render etc.)
+See **DEPLOY_RENDER.md** for why a hosted run can be much slower than on your computer, the database errors seen on hosts, the settings to use, and `render.yaml`.
+
 ## Optional settings (copy `.env.example` to `.env`)
 | Feature | Setting | Cost |
 |---|---|---|

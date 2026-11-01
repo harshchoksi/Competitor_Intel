@@ -91,4 +91,8 @@ def parse_json_object(text: str) -> dict:
 
 def client_from_env() -> GeminiClient | None:
     key = os.environ.get("GEMINI_API_KEY", "").strip()
-    return GeminiClient(key, os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_MODEL) if key else None
+    try:
+        timeout = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "") or 30)  # was 90 s x 3 attempts per call: one unreachable API could stall a run for minutes
+    except ValueError:
+        timeout = 30.0
+    return GeminiClient(key, os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_MODEL, timeout=timeout) if key else None

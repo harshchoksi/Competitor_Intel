@@ -153,6 +153,9 @@ class PoliteClient:
         except httpx.TransportError as exc:
             raise _RetryableError(f"{type(exc).__name__}: {exc}") from exc
         if resp.status_code == 429 or resp.status_code >= 500:
+            retry_after = resp.headers.get("retry-after", "")
+            if resp.status_code == 429 and retry_after.isdigit():
+                self._sleep(min(int(retry_after), 20))  # the site told us how long to back off; ignoring it gets datacenter IPs blocked
             raise _RetryableError(f"HTTP {resp.status_code}")
         return FetchResult(
             url=str(resp.url),
@@ -220,6 +223,8 @@ class PoliteClient:
             return None
 
     def _write_cache(self, url: str, res: FetchResult) -> None:
+        if self.settings.cache_ttl_minutes <= 0 or len(res.text) > 1_500_000 or res.content_type.lower().startswith(("image/", "video/", "audio/", "application/pdf")):
+            return  # nothing would ever read it back (or it is a huge/binary file); do not fill the disk
         path = self._cache_path(url)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
