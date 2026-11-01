@@ -65,8 +65,9 @@ class ShopifyScraper(BaseScraper):
 
     def scrape(self) -> list[ProductRecord]:
         products: list[ProductRecord] = []
+        seen_ids: set[str] = set()
         page = 1
-        while len(products) < self.max_products:
+        while len(products) < self.max_products and not self.out_of_time():
             res = self.client.get(f"{self.origin}/products.json", params={"limit": PAGE_SIZE, "page": page})
             if res is None or not res.ok:
                 if page == 1:
@@ -80,13 +81,19 @@ class ShopifyScraper(BaseScraper):
                 raise ScrapeError("/products.json returned an unexpected payload")
             if not items:
                 break
+            new_on_page = 0
             for item in items:
                 rec = parse_shopify_product(item, self.origin, self.currency)
-                if rec and self.wants(rec):
+                if rec is None or rec.external_id in seen_ids:
+                    continue
+                seen_ids.add(rec.external_id)
+                new_on_page += 1
+                if self.wants(rec):
                     products.append(rec)
                     if len(products) >= self.max_products:
                         break
-            if len(items) < PAGE_SIZE:
+            self.report(len(products))
+            if len(items) < PAGE_SIZE or new_on_page == 0:  # last page, or the site is repeating itself
                 break
             page += 1
         return products

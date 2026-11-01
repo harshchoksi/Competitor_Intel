@@ -60,8 +60,9 @@ class WooCommerceScraper(BaseScraper):
 
     def scrape(self) -> list[ProductRecord]:
         products: list[ProductRecord] = []
+        seen_ids: set[str] = set()
         page = 1
-        while len(products) < self.max_products:
+        while len(products) < self.max_products and not self.out_of_time():
             res = self.client.get(
                 f"{self.origin}/wp-json/wc/store/v1/products", params={"per_page": PER_PAGE, "page": page}
             )
@@ -76,13 +77,19 @@ class WooCommerceScraper(BaseScraper):
                 raise ScrapeError("WooCommerce Store API returned an unexpected payload")
             if not items:
                 break
+            new_on_page = 0
             for item in items:
                 rec = parse_woo_product(item, self.currency)
-                if rec and self.wants(rec):
+                if rec is None or rec.external_id in seen_ids:
+                    continue
+                seen_ids.add(rec.external_id)
+                new_on_page += 1
+                if self.wants(rec):
                     products.append(rec)
                     if len(products) >= self.max_products:
                         break
-            if len(items) < PER_PAGE:
+            self.report(len(products))
+            if len(items) < PER_PAGE or new_on_page == 0:
                 break
             page += 1
         return products

@@ -36,6 +36,8 @@ class SiteResult:
     reachable: bool = True
     signals: dict | None = None
     social: dict | None = None
+    warnings: list[str] = field(default_factory=list)
+    currency: str | None = None  # detected from the homepage; product records may carry their own
 
 
 def build_chain(detection: DetectionResult, settings: ScrapingSettings | None = None) -> list[type[BaseScraper]]:
@@ -53,15 +55,17 @@ def build_chain(detection: DetectionResult, settings: ScrapingSettings | None = 
 BROWSER_HINT = " If this site loads its products with JavaScript, install the optional browser (see README, 'JavaScript-rendered sites')."
 
 
-def scrape_site(site: SiteConfig, is_source: bool, cfg: AppConfig, client: PoliteClient) -> SiteResult:
+def scrape_site(site: SiteConfig, is_source: bool, cfg: AppConfig, client: PoliteClient,
+                on_count: Callable[[int], None] | None = None) -> SiteResult:
     """Products via the scraper chain, then (best effort) offers/policies/social/marketing signals."""
-    result = _scrape_products(site, is_source, cfg, client)
+    result = _scrape_products(site, is_source, cfg, client, on_count)
     if result.reachable:
         result.signals = collect_site_signals(client, site.origin)
     return result
 
 
-def _scrape_products(site: SiteConfig, is_source: bool, cfg: AppConfig, client: PoliteClient) -> SiteResult:
+def _scrape_products(site: SiteConfig, is_source: bool, cfg: AppConfig, client: PoliteClient,
+                     on_count: Callable[[int], None] | None = None) -> SiteResult:
     t0 = time.monotonic()
     result = SiteResult(site=site, is_source=is_source)
     try:
@@ -70,17 +74,22 @@ def _scrape_products(site: SiteConfig, is_source: bool, cfg: AppConfig, client: 
         if not detection.reachable:
             result.error, result.reachable = "; ".join(detection.evidence), False
             return result
+        result.currency = detection.currency
         logger.info("{}: detected {} ({})", site.name, detection.platform.value, "; ".join(detection.evidence))
         errors: list[str] = []
         chain = build_chain(detection, cfg.scraping)
         for scraper_cls in chain:
             scraper = scraper_cls(client, site, cfg)
+            scraper.progress_cb = on_count
+            if detection.currency:
+                scraper.currency = detection.currency
             try:
                 products = scraper.scrape()
             except ScrapeError as exc:
                 errors.append(f"{scraper.method}: {exc}")
                 logger.warning("{}: {} failed: {}", site.name, scraper.method, exc)
                 continue
+            result.warnings.extend(scraper.warnings)
             if products:
                 result.products, result.method, result.status = products, scraper.method, "ok"
                 logger.info("{}: {} products via {}", site.name, len(products), scraper.method)
@@ -118,7 +127,7 @@ def persist_result(session: Session, run_id: int, res: SiteResult) -> None:
     session.add(
         ScrapeLog(
             run_id=run_id, site_id=site.id, platform_detected=res.platform, method=res.method,
-            product_count=len(res.products), status=res.status, error=res.error, duration_seconds=res.duration,
+            product_count=len(res.products), status=res.status, error=res.error or ('; '.join(res.warnings) or None), duration_seconds=res.duration,
         )
     )
     for o in (res.signals or {}).get("offers", []):
@@ -153,7 +162,14 @@ def persist_result(session: Session, run_id: int, res: SiteResult) -> None:
             )
 
 
-ProgressFn = Callable[[str, str, "SiteResult | None"], None]  # (event: start|done, site_key, result)
+ProgressFn = Callable[[str, str, "SiteResult | None"], None]  # (event: start|count|done, site_key, result)
+
+
+def _counter(emit: Callable[..., None], key: str) -> Callable[[int], None]:
+    """Live 'N products read so far' updates. The count rides in a throwaway SiteResult-free tuple via the result slot."""
+    def on_count(n: int) -> None:
+        emit("count", key, n)  # type: ignore[arg-type]
+    return on_count
 
 
 def run_scrape(
@@ -197,7 +213,7 @@ def run_scrape(
     if parallel <= 1 or len(targets) <= 1:
         for site, is_source in targets:
             emit("start", site.key)
-            res = scrape_site(site, is_source, cfg, client)
+            res = scrape_site(site, is_source, cfg, client, _counter(emit, site.key))
             by_key[site.key] = res
             finish(res)
     else:
@@ -205,7 +221,7 @@ def run_scrape(
             futures = {}
             for site, is_source in targets:
                 emit("start", site.key)
-                futures[pool.submit(scrape_site, site, is_source, cfg, client)] = site
+                futures[pool.submit(scrape_site, site, is_source, cfg, client, _counter(emit, site.key))] = site
             for fut in as_completed(futures):
                 res = fut.result()  # scrape_site never raises
                 by_key[res.site.key] = res

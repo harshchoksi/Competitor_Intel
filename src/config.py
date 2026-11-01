@@ -54,8 +54,14 @@ class SiteConfig(BaseModel):
         return slugify(self.name)
 
 
+# Safety ceiling only. "All products" really means all: this just stops a runaway crawl of an endless/infinite catalogue.
+HARD_PRODUCT_CAP = 200_000
+
+
 class ScrapingSettings(BaseModel):
     rate_limit_per_sec: float = Field(default=1.0, gt=0, le=50)
+    concurrency: int = Field(default=4, ge=1, le=16)  # parallel page fetches for sites without a JSON feed (rate limit still applies)
+    max_site_minutes: float = Field(default=45.0, gt=0)  # per-site time budget; partial results are kept and flagged
     timeout_seconds: float = Field(default=20.0, gt=0)
     max_retries: int = Field(default=3, ge=1, le=10)
     respect_robots: bool = True
@@ -81,7 +87,7 @@ class AppConfig(BaseModel):
     source: SiteConfig
     competitors: list[SiteConfig] = Field(min_length=1, max_length=6)
     categories_to_track: list[str] = Field(default_factory=list)
-    max_products_per_site: int = Field(default=200, ge=1)
+    max_products_per_site: int | None = Field(default=None, ge=1)  # None = read every product the site exposes
     country: str = "IN"
     currency: str = "INR"
     schedule: str = "daily"
@@ -98,6 +104,11 @@ class AppConfig(BaseModel):
         if dupes:
             raise ValueError(f"site names must be unique; duplicates: {sorted(dupes)}")
         return self
+
+    @property
+    def product_cap(self) -> int:
+        """Effective per-site cap: the user's limit, or the safety ceiling when they asked for everything."""
+        return min(self.max_products_per_site or HARD_PRODUCT_CAP, HARD_PRODUCT_CAP)
 
     def all_sites_flat(self) -> list[SiteConfig]:
         return [self.source, *self.competitors]

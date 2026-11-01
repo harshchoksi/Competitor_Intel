@@ -29,6 +29,7 @@ def browser_enabled(mode: str) -> bool:
 
 class BrowserScraper(JsonLdScraper):
     method = "browser"
+    max_workers_override = 1
 
     def __init__(self, *a: Any, **kw: Any) -> None:
         super().__init__(*a, **kw)

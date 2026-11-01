@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import re
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 from pydantic import BaseModel, Field
 
@@ -81,8 +83,26 @@ class BaseScraper(ABC):
         self.site = site
         self.cfg = cfg
         self.origin = site.origin
-        self.max_products = cfg.max_products_per_site
+        self.max_products = cfg.product_cap
         self.currency = cfg.currency
+        self.progress_cb: Callable[[int], None] | None = None  # called with the running product count
+        self.warnings: list[str] = []  # non-fatal notes (e.g. stopped early); surfaced in "Data quality"
+        self._deadline = time.monotonic() + cfg.scraping.max_site_minutes * 60
+
+    def report(self, count: int) -> None:
+        if self.progress_cb:
+            try:
+                self.progress_cb(count)
+            except Exception:  # noqa: S110 - progress display must never break scraping
+                pass
+
+    def out_of_time(self) -> bool:
+        if time.monotonic() > self._deadline:
+            msg = f"stopped after the {self.cfg.scraping.max_site_minutes:g}-minute time budget; the list may be incomplete"
+            if msg not in self.warnings:
+                self.warnings.append(msg)
+            return True
+        return False
 
     def wants(self, rec: ProductRecord) -> bool:
         """categories_to_track filter (substring match on title/category/tags/url). Empty = keep all."""

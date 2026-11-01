@@ -1,7 +1,8 @@
-"""Six fake stores on localhost:8101-8106 for trying the tool without touching live sites.
+"""Six fake grocery stores (~120 products each) on localhost:8101-8106 for trying the tool without touching live sites.
 
 8101 Shopify (use as YOUR store) | 8102 WooCommerce | 8103 custom (JSON-LD) | 8104 Shopify | 8105 WooCommerce | 8106 custom
-Prices, stock and discounts differ per store; a few products are missing from some stores.
+Every store words product names and pack sizes differently ("Chicken Breast 500g" / "CHICKEN BREAST FRESHFARM, 0.5 kg"),
+prices differ per store, and a few products are missing from some stores - perfect for testing semantic matching.
 """
 from __future__ import annotations
 
@@ -10,17 +11,43 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-# (sku, brand, base price INR, category)
-CATALOG = [
-    ("HP-100", "Sonex", 1999, "Headphones"), ("HP-200", "Sonex", 3499, "Headphones"),
-    ("HP-300", "Auralis", 5999, "Headphones"), ("SP-100", "Auralis", 2499, "Speakers"),
-    ("SP-200", "Boomer", 4499, "Speakers"), ("SP-300", "Boomer", 7999, "Speakers"),
-    ("WT-100", "Chronos", 2999, "Watches"), ("WT-200", "Chronos", 6499, "Watches"),
-    ("EB-100", "Sonex", 1299, "Earbuds"), ("EB-200", "Auralis", 2199, "Earbuds"),
-    ("PB-100", "Voltix", 999, "Power banks"), ("PB-200", "Voltix", 1799, "Power banks"),
-    ("CH-100", "Voltix", 699, "Chargers"), ("CH-200", "Voltix", 1299, "Chargers"),
-]
-SINGULAR = {"Headphones": "Headphone", "Speakers": "Speaker", "Watches": "Watch", "Earbuds": "Earbud", "Power banks": "Power bank", "Chargers": "Charger"}
+
+# ---- a ~120-product grocery catalogue, named differently by every store -------------------------------------------
+# (name, brand, category, base price INR, size_value, size_unit)
+def _build_catalog() -> list[tuple]:
+    out: list[tuple] = []
+    meat_base = {"Chicken": 260, "Beef": 520, "Pork": 340, "Lamb": 720, "Turkey": 410}
+    cut_mult = {"Breast": 1.15, "Thighs": 0.95, "Mince": 1.0, "Ribs": 1.1, "Sausages": 0.9}
+    for animal, base in meat_base.items():
+        for cut, mult in cut_mult.items():
+            for size_v, size_u in ((500, "g"), (1000, "g")):
+                out.append((f"{animal} {cut}", "FreshFarm", "Meat", round(base * mult * size_v / 500), size_v, size_u))
+    seafood = {"Salmon Fillet": 690, "Tiger Prawns": 560, "Tuna Steak": 480, "Basa Fillet": 280, "Crab Meat": 640}
+    for name, base in seafood.items():
+        for size_v in (250, 500):
+            out.append((name, "OceanCatch", "Seafood", round(base * size_v / 500), size_v, "g"))
+    dairy = [("Whole Milk", "Amul", 68, 1000, "ml"), ("Low Fat Milk", "Amul", 64, 1000, "ml"), ("Cheddar Cheese", "Britannia", 160, 200, "g"), ("Greek Yogurt", "Epigamia", 120, 400, "g"),
+             ("Salted Butter", "Amul", 275, 500, "g"), ("Cream Cheese", "Philadelphia", 210, 200, "g"), ("Mozzarella Cheese", "Britannia", 190, 200, "g"), ("Paneer", "Amul", 95, 200, "g")]
+    out += [(n, b, "Dairy", p, v, u) for n, b, p, v, u in dairy]
+    drinks = [("Orange Juice", "Tropicana", 120, 1000, "ml"), ("Apple Juice", "Tropicana", 125, 1000, "ml"), ("Pineapple Juice", "Real", 110, 1000, "ml"), ("Mango Juice", "Real", 105, 1000, "ml"),
+              ("Cola Soft Drink", "Coca-Cola", 40, 750, "ml"), ("Lemon Soda", "Sprite", 38, 750, "ml"), ("Sparkling Water", "Perrier", 130, 750, "ml"), ("Mineral Water", "Bisleri", 22, 1000, "ml"),
+              ("Green Tea Bags", "Lipton", 210, 100, "pcs"), ("Instant Coffee", "Nescafe", 340, 200, "g")]
+    out += [(n, b, "Drinks", p, v, u) for n, b, p, v, u in drinks]
+    pantry = [("Basmati Rice", "India Gate", 780, 5000, "g"), ("White Sugar", "Madhur", 52, 1000, "g"), ("Spaghetti Pasta", "Barilla", 150, 500, "g"), ("Extra Virgin Olive Oil", "Figaro", 780, 1000, "ml"),
+              ("Whole Wheat Flour", "Aashirvaad", 280, 5000, "g"), ("Tomato Ketchup", "Kissan", 160, 950, "g"), ("Peanut Butter Crunchy", "Sundrop", 245, 462, "g"), ("Honey", "Dabur", 220, 500, "g"),
+              ("Corn Flakes Cereal", "Kelloggs", 230, 475, "g"), ("Rolled Oats", "Quaker", 205, 1000, "g"), ("Sunflower Oil", "Fortune", 190, 1000, "ml"), ("Iodised Salt", "Tata", 28, 1000, "g")]
+    out += [(n, b, "Pantry", p, v, u) for n, b, p, v, u in pantry]
+    produce = [("Tomatoes", 60), ("Onions", 45), ("Potatoes", 38), ("Carrots", 55), ("Bananas", 70), ("Apples", 190), ("Lemons", 95), ("Spinach", 40), ("Cucumber", 50), ("Eggplant", 65),
+               ("Broccoli", 110), ("Capsicum", 120), ("Mangoes", 210), ("Grapes", 160), ("Garlic", 240)]
+    for name, base in produce:
+        for size_v in (500, 1000):
+            out.append((name, "", "Produce", round(base * size_v / 1000), size_v, "g"))
+    snacks = [("Potato Chips Salted", "Lays", 20, 52, "g"), ("Chocolate Cookies", "Britannia", 35, 120, "g"), ("Dark Chocolate Bar", "Amul", 110, 150, "g"), ("Salted Peanuts", "Haldirams", 60, 200, "g")]
+    out += [(n, b, "Snacks", p, v, u) for n, b, p, v, u in snacks]
+    return out
+
+
+CATALOG = _build_catalog()
 STATE = {"epoch": 0}
 
 
@@ -37,28 +64,54 @@ def reset() -> None:
 PORTS = (8101, 8102, 8103, 8104, 8105, 8106)
 KIND = {8101: "shopify", 8102: "woo", 8103: "custom", 8104: "shopify", 8105: "woo", 8106: "custom"}
 FACTOR = {8101: 1.00, 8102: 0.93, 8103: 1.08, 8104: 0.97, 8105: 1.04, 8106: 0.89}
-TITLES = {
-    8101: "{b} {s} Wireless {c}", 8102: "{b} {c} Model {s}", 8103: "{b} {s} {c} (Black)",
-    8104: "{s} {b} {c} Pro", 8105: "{b} {c} {s}", 8106: "{b} {s} {c} Edition",
-}
+SYNONYM = {"Tiger Prawns": ["Tiger Prawns", "Shrimp Tiger", "Jumbo Prawn"], "Eggplant": ["Eggplant", "Aubergine", "Brinjal"], "Mince": ["Mince", "Ground", "Minced"], "Lemons": ["Lemons", "Lemon Bag", "Lemon"],
+           "Cola Soft Drink": ["Cola Soft Drink", "Cola Drink", "Cola Soda"], "Thighs": ["Thighs", "Thigh", "Thigh Pieces"]}
+
+
+def _size(v: int, u: str, style: int) -> str:
+    """Same pack size, written differently by each store (500 g / 0.5 kg / 500gm / 1 lb-ish stays the same size)."""
+    if u == "g":
+        return [f"{v}g", f"{v / 1000:g} kg" if v >= 1000 or style == 1 else f"{v}g", f"{v} g", f"{v / 1000:g}kg", f"{v}gm", f"{v / 1000:g} KG"][style % 6]
+    if u == "ml":
+        return [f"{v}ml", f"{v / 1000:g} L" if v >= 1000 else f"{v}ml", f"{v} ml", f"{v / 1000:g}ltr" if v >= 1000 else f"{v}ml", f"{v}ml", f"{v / 10:g}cl"][style % 6]
+    return f"{v} pcs" if style % 2 else f"{v} pack"
+
+
+def _title(port: int, name: str, brand: str, v: int, u: str) -> str:
+    for k, alts in SYNONYM.items():
+        if k in name:
+            name = name.replace(k, alts[port % len(alts)])
+    size = _size(v, u, PORTS.index(port))
+    style = PORTS.index(port) % 5
+    if style == 0:
+        return f"{brand} {name} {size}".strip()
+    if style == 1:
+        return f"{name.upper()} {brand.upper()}, {size}".replace(" ,", ",").strip()
+    if style == 2:
+        return f"{name} - {size} ({brand})" if brand else f"{name} - {size}"
+    if style == 3:
+        return f"{brand} {name}, {size}".strip(" ,")
+    return f"Fresh {name} {size} {brand}".strip()
 
 
 def items(port: int):
     e = STATE["epoch"]
-    catalog = list(CATALOG) + ([("CH-300", "Voltix", 1599, "Chargers")] if e and port == 8102 else [])
-    for i, (sku, brand, base, cat) in enumerate(catalog):
-        if port != 8101 and (i + port) % 9 == 0:
+    catalog = list(CATALOG) + ([("Chicken Wings", "FreshFarm", "Meat", 300, 500, "g")] if e and port == 8102 else [])
+    for i, (name, brand, cat, base, v, u) in enumerate(catalog):
+        if port != 8101 and (i * 7 + port) % 8 == 0:
             continue  # this store doesn't carry it
         if e and port == 8103 and i == len(CATALOG) - 1:
             continue  # delisted after the change
-        price = round(base * FACTOR[port] / 10) * 10 - 1
+        noise = 1 + (((i * 31 + port * 17) % 13) - 6) / 100  # +/- 6% store-specific variation
+        price = max(5, round(base * FACTOR[port] * noise))
         if e and port != 8101 and i % 3 == 0:
             price = round(price * (1 - 0.08 * min(e, 3)))  # price cuts
+        sku = f"G-{i + 1:04d}" if port == 8101 else (f"{port % 100}{i + 1:05d}" if port in (8102, 8103) else f"X{i + 1:04d}")
         yield {
             "i": i, "sku": sku, "brand": brand, "cat": cat, "price": price,
-            "list": round(price * (1.2 + 0.05 * (port % 4))) if (i + port) % 3 == 0 else None,
-            "stock": (i + port) % 5 != 4, "low": (i * port) % 7 == 3,
-            "title": TITLES[port].format(b=brand, s=sku, c=SINGULAR.get(cat, cat)),
+            "list": round(price * (1.2 + 0.05 * (port % 4))) if (i + port) % 7 == 0 else None,
+            "stock": (i + port) % 9 != 4, "low": (i * port) % 17 == 3,
+            "title": _title(port, name, brand, v, u),
         }
 
 
@@ -75,7 +128,7 @@ def home_html(port: int) -> str:
     marker = {"shopify": '<script src="https://cdn.shopify.com/s/x.js"></script>', "woo": "", "custom": ""}[kind]
     body_cls = ' class="woocommerce"' if kind == "woo" else ""
     pct = 10 + port % 10
-    banner = f"Flat {pct}% OFF on audio. Use code SAVE{pct} at checkout"
+    banner = f"Flat {pct}% OFF on groceries. Use code SAVE{pct} at checkout"
     if e and port != 8101:
         banner += f" | Flash sale: extra 5% off with code FLASH{e}"
     return (f"<html><head>{marker}{''.join(SCRIPTS[x] for x in PIXELS[port])}</head><body{body_cls}>"

@@ -1,0 +1,3 @@
+# Optional: sentence-embedding similarity for even smarter matching (finds synonyms the built-in dictionary does not know).
+# ~100 MB of downloads on first use. Without it the matcher still works fully offline.
+sentence-transformers>=3.0

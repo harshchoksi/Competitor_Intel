@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from urllib.parse import urlparse
 
@@ -11,12 +12,14 @@ from sqlalchemy import Engine, select
 
 from src.analysis.history import attach_history
 from src.analysis.metrics import analyze
+from src.analysis.pricing import PricingOptions
 from src.analysis.types import SiteData
 from src.config import AppConfig, ScrapingSettings
 from src.db.models import Analysis, Site, SocialSnapshot, utcnow
 from src.db.session import session_scope
 from src.llm.gemini import GeminiClient, client_from_env
 from src.llm.insights import generate_ai_insights
+from src.llm.match_verify import make_verifier
 from src.monitoring import notify_for_monitor
 from src.scrapers.http import PoliteClient
 from src.scrapers.runner import SiteResult, run_scrape
@@ -49,11 +52,19 @@ def build_config(source_url: str, competitor_urls: list[str], options: dict, cac
     return AppConfig.model_validate({
         "source": {"name": site_label(source_url), "url": source_url},
         "competitors": [{"name": site_label(u), "url": u} for u in competitor_urls],
-        "max_products_per_site": options.get("max_products", 100),
-        "match_threshold": options.get("match_threshold", 0.85),
+        "max_products_per_site": options.get("max_products") or None,  # None / 0 = every product
+        "match_threshold": options.get("match_threshold", 0.80),
         "categories_to_track": options.get("categories", []),
-        "scraping": {"rate_limit_per_sec": options.get("rate_limit_per_sec", 1.0), "cache_ttl_minutes": 10, "cache_dir": cache_dir},
+        **({"currency": options["currency"]} if options.get("currency") else {}),
+        "scraping": {"rate_limit_per_sec": options.get("rate_limit_per_sec", 2.0), "cache_ttl_minutes": 10, "cache_dir": cache_dir},
     })
+
+
+def pricing_options_from(options: dict) -> PricingOptions:
+    d = PricingOptions()
+    return PricingOptions(
+        tolerance_pct=float(options.get("tolerance_pct", d.tolerance_pct)), max_increase_pct=float(options.get("max_increase_pct", d.max_increase_pct)),
+        undercut_pct=float(options.get("undercut_pct", d.undercut_pct)), exclude_out_of_stock=bool(options.get("exclude_out_of_stock", d.exclude_out_of_stock)))
 
 
 def _update(engine: Engine, analysis_id: str, **fields) -> None:
@@ -105,15 +116,25 @@ def execute_analysis(analysis_id: str, engine: Engine, client_factory: ClientFac
         lock = threading.Lock()
         _update(engine, analysis_id, status="running", progress=progress)
 
-        def on_progress(event: str, key: str, res: SiteResult | None) -> None:
+        last_write = [0.0]
+
+        def on_progress(event: str, key: str, res) -> None:  # res: SiteResult for "done", running product count (int) for "count"
             with lock:
                 entry = progress["sites"][key]
-                if event == "start":
+                if event == "count":
+                    entry["products"] = int(res)
+                    entry["message"] = f"Reading products... {int(res):,} found so far"
+                    now = time.monotonic()
+                    if now - last_write[0] < 1.5:  # the page polls every 1.5 s; do not hammer the database
+                        return
+                    last_write[0] = now
+                elif event == "start":
                     entry["state"], entry["message"] = "scraping", "Reading products..."
                 elif res is not None:
                     entry["state"] = "done" if res.status == "ok" else "failed"
                     entry["products"] = len(res.products)
-                    entry["message"] = (f"{len(res.products)} products via {res.platform}" if res.status == "ok" else (res.error or "failed"))
+                    entry["message"] = (f"{len(res.products):,} products via {res.platform}" + (f" ({'; '.join(res.warnings)})" if res.warnings else "")
+                                        if res.status == "ok" else (res.error or "failed"))
                 snapshot = {"stage": progress["stage"], "sites": {k: dict(v) for k, v in progress["sites"].items()}}
             _update(engine, analysis_id, progress=snapshot)
 
@@ -131,20 +152,31 @@ def execute_analysis(analysis_id: str, engine: Engine, client_factory: ClientFac
         progress["stage"] = "analyzing"
         _update(engine, analysis_id, run_id=run_id, progress={"stage": "analyzing", "sites": progress["sites"]})
         sites = [_to_site_data(r) for r in results]
-        result = analyze(sites, match_threshold=cfg.match_threshold, undercut_alert_pct=options.get("undercut_alert_pct", 5.0))
+        use_ai = options.get("use_ai", True)
+        llm = (llm_factory or default_llm_factory)() if use_ai else None
+        for r, sd in zip(results, sites, strict=True):  # carry scraper warnings into the data-quality table
+            if r.warnings and sd.status == "ok":
+                sd.error = "; ".join(r.warnings)
+        try:
+            result = analyze(sites, match_threshold=cfg.match_threshold, undercut_alert_pct=options.get("undercut_alert_pct", 5.0),
+                             currency=options.get("currency") or next((r.currency for r in results if r.is_source and r.currency), None),
+                             pricing_options=pricing_options_from(options), verifier=make_verifier(llm) if llm is not None else None)
+        except Exception:
+            if llm is not None:
+                llm.close()
+            raise
 
         if result["comparison_available"]:
             try:
-                attach_history(engine, result, run_id, cfg.max_products_per_site, options.get("undercut_alert_pct", 5.0))
+                attach_history(engine, result, run_id, cfg.product_cap, options.get("undercut_alert_pct", 5.0))
             except Exception:
                 logger.exception("history analysis failed for {}", analysis_id)
                 result["changes"] = {"has_history": False, "sites": {}}
             progress["stage"] = "writing"
             _update(engine, analysis_id, progress={"stage": "writing", "sites": progress["sites"]})
-            llm = (llm_factory or default_llm_factory)() if options.get("use_ai", True) else None
-            result["ai"] = generate_ai_insights(result, llm, use_ai=options.get("use_ai", True))
-            if llm is not None:
-                llm.close()
+            result["ai"] = generate_ai_insights(result, llm, use_ai=use_ai)
+        if llm is not None:
+            llm.close()
 
         if monitor_id and result["comparison_available"]:
             try:

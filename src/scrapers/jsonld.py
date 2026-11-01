@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
 
 import extruct
@@ -15,8 +16,9 @@ DEFAULT_SITEMAPS = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml", "/p
 PRODUCT_HINTS = ("/product/", "/products/", "/p/", "/item/", "/shop/", "/buy/", "/dp/")
 EXCLUDE_HINTS = ("/category/", "/collections/", "/tag/", "/blog", "/cart", "/account", "/cdn-cgi/")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".pdf", ".gz")
-MAX_CHILD_SITEMAPS = 20
-MAX_CANDIDATE_URLS = 20000
+MAX_CHILD_SITEMAPS = 300
+MAX_CANDIDATE_URLS = 300_000
+FETCH_BATCH = 40  # pages fetched per parallel batch
 GIVE_UP_AFTER = 10  # pages with no product data before we abandon this strategy
 
 IN_STOCK = {"instock", "onlineonly", "instoreonly", "limitedavailability"}
@@ -300,25 +302,45 @@ class JsonLdScraper(BaseScraper):
                 links.append(full)
         return links
 
+    max_workers_override: int | None = None  # the browser scraper sets 1 (a single Chromium page is not thread-safe)
+
+    def _workers(self) -> int:
+        return self.max_workers_override or self.cfg.scraping.concurrency
+
     def scrape(self) -> list[ProductRecord]:
         urls = self.discover_urls()
         if not urls:
             raise ScrapeError("no product URLs found (no usable sitemap or product links)")
         logger.info("{}: {} candidate product pages", self.site.name, len(urls))
         products: list[ProductRecord] = []
+        seen: set[str] = set()
         fetched = misses = 0
         max_pages = self.max_products * 2
-        for url in urls:
-            if len(products) >= self.max_products or fetched >= max_pages:
-                break
+        workers = self._workers()
+
+        def parse(url: str) -> list[ProductRecord]:
             page = self.fetch_page(url)
-            fetched += 1
-            found = extract_products_from_html(page[0], page[1], self.currency) if page else []
-            found = [p for p in found if self.wants(p)]
-            if found:
-                products.extend(found)
-            else:
-                misses += 1
-                if not products and misses >= GIVE_UP_AFTER:
-                    raise ScrapeError(f"no schema.org Product data on the first {misses} product pages")
+            return extract_products_from_html(page[0], page[1], self.currency) if page else []
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            pos = 0
+            while pos < len(urls):
+                if len(products) >= self.max_products or fetched >= max_pages or self.out_of_time():
+                    break
+                size = FETCH_BATCH if products else GIVE_UP_AFTER  # probe a few pages first: bail out fast on sites with no product data
+                batch = urls[pos:pos + size]
+                pos += size
+                batch_results = list(pool.map(parse, batch)) if workers > 1 else [parse(u) for u in batch]
+                for found in batch_results:
+                    fetched += 1
+                    found = [p for p in found if self.wants(p) and p.external_id not in seen]
+                    if found:
+                        for p in found:
+                            seen.add(p.external_id)
+                        products.extend(found)
+                    else:
+                        misses += 1
+                        if not products and misses >= GIVE_UP_AFTER:
+                            raise ScrapeError(f"no schema.org Product data on the first {misses} product pages")
+                self.report(len(products))
         return products[: self.max_products]

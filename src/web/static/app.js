@@ -1,7 +1,7 @@
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
-const OKABE = ["#E69F00", "#56B4E9", "#009E73", "#CC79A7", "#D55E00", "#8c8c8c"]; // colour-blind friendly
-const SOURCE_COLOR = "#2563eb";
+const OKABE = ["#f59e0b", "#ef4444", "#10b981", "#e879f9", "#fb923c", "#a8896e"]; // warm dark palette
+const SOURCE_COLOR = "#f59e0b";
 const MAX_COMP = 5;
 let pollTimer = null, charts = [], currentId = null, currentAnalysis = null;
 
@@ -20,7 +20,14 @@ function h(tag, props = {}, ...kids) {
   }
   return el;
 }
-const inr = n => (n == null ? "–" : "₹" + Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 }));
+let CUR = "INR";
+const money = n => {
+  if (n == null) return "–";
+  const big = Math.abs(n) >= 100, d = big ? 0 : 2;
+  try { return new Intl.NumberFormat(CUR === "INR" ? "en-IN" : undefined, { style: "currency", currency: CUR, minimumFractionDigits: d, maximumFractionDigits: d }).format(n); }
+  catch { return CUR + " " + Number(n).toFixed(d); }
+};
+const inr = money; // older cards call it inr
 const pct = (n, d = 1) => (n == null ? "–" : (n > 0 ? "+" : "") + n.toFixed(d) + "%");
 const safeUrl = u => (/^https?:\/\//i.test(u || "") ? u : null);
 
@@ -48,20 +55,27 @@ $("#demo").addEventListener("click", () => {
   $("#source").value = "localhost:8101";
   $("#competitors").innerHTML = "";
   [8102, 8103, 8104, 8105, 8106].forEach(p => addCompetitor("localhost:" + p));
+  $("#rate-limit").value = 10; // local demo stores: no need to be slow
 });
+function formOptions() {
+  const num = (id, dflt) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : dflt; };
+  return {
+    max_products: parseInt($("#max-products").value, 10) || null,
+    match_threshold: (parseInt($("#match-threshold").value, 10) || 80) / 100,
+    categories: $("#categories").value.split(",").map(s => s.trim()).filter(Boolean),
+    use_ai: $("#use-ai").checked,
+    currency: $("#currency").value.trim().toUpperCase() || null,
+    tolerance_pct: num("#tolerance", 3), max_increase_pct: num("#max-increase", 5),
+    rate_limit_per_sec: num("#rate-limit", 2),
+  };
+}
 $("#form").addEventListener("submit", async ev => {
   ev.preventDefault();
   showError("");
   const comps = [...document.querySelectorAll(".comp-input")].map(i => i.value.trim()).filter(Boolean);
   if (!$("#source").value.trim()) return showError("Enter your website.");
   if (!comps.length) return showError("Add at least one competitor.");
-  const body = {
-    source_url: $("#source").value.trim(), competitor_urls: comps,
-    max_products: parseInt($("#max-products").value, 10) || 100,
-    match_threshold: (parseInt($("#match-threshold").value, 10) || 85) / 100,
-    categories: $("#categories").value.split(",").map(s => s.trim()).filter(Boolean),
-    use_ai: $("#use-ai").checked,
-  };
+  const body = { source_url: $("#source").value.trim(), competitor_urls: comps, ...formOptions() };
   $("#go").disabled = true;
   try {
     const res = await fetch("/api/analyses", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -84,7 +98,7 @@ function startWatching(id) {
 }
 async function poll() {
   try {
-    const res = await fetch("/api/analyses/" + currentId);
+    const res = await fetch("/api/analyses/" + currentId + "?lite=1");
     if (!res.ok) throw new Error("Analysis not found");
     const a = await res.json();
     renderProgress(a);
@@ -95,7 +109,7 @@ async function poll() {
 function renderProgress(a) {
   const sites = (a.progress && a.progress.sites) || {};
   const stage = a.progress && a.progress.stage;
-  $("#progress-title").textContent = stage === "analyzing" ? "Comparing products…" : "Reading websites…";
+  $("#progress-title").textContent = stage === "analyzing" ? "Matching products and working out prices…" : stage === "writing" ? "Writing the summary…" : "Reading every product on each website…";
   const list = $("#progress-list"); list.innerHTML = "";
   for (const s of Object.values(sites)) {
     list.append(h("li", {}, h("span", { class: "name" }, s.name, " ", s.role === "source" ? h("span", { class: "chip source" }, "you") : null),
@@ -125,112 +139,89 @@ function chartCard(title, note) {
 }
 function renderResults(r) {
   const root = $("#results"); root.innerHTML = ""; root.classList.remove("hidden");
-  const src = r.sites[r.source_key];
+  CUR = r.currency || "INR";
   const comps = r.competitors || [];
   const colorOf = {}; comps.forEach((c, i) => colorOf[c.key] = OKABE[i % OKABE.length]); colorOf[r.source_key] = SOURCE_COLOR;
-  const totalMatched = comps.reduce((a, c) => a + c.matched, 0);
-  const avgGap = comps.filter(c => c.matched).length ? comps.filter(c => c.matched).reduce((a, c) => a + c.avg_gap_pct, 0) / comps.filter(c => c.matched).length : null;
-  const warnings = (r.alerts || []).filter(a => a.level === "warning").length;
-
   if (!r.comparison_available) { root.append(dataQuality(r)); return; }
 
   root.append(h("div", { class: "card toolbar", style: "justify-content:space-between" },
-    h("span", {}, "Report ready. Includes all charts, alerts and appendices."),
-    h("a", { class: "btn", href: "/api/analyses/" + currentId + "/report.pdf", download: "" }, "Download PDF report")));
+    h("span", {}, "Analysis ready. Every product on every site was read and compared."),
+    h("span", { class: "toolbar" },
+      h("a", { class: "btn ghost-btn", href: `/api/analyses/${currentId}/pricing.csv` }, "Export CSV"),
+      h("a", { class: "btn", href: "/api/analyses/" + currentId + "/report.pdf", download: "" }, "Download PDF report"))));
 
-  root.append(h("div", { class: "kpis" },
-    kpi(src ? src.product_count : 0, "your products read"),
-    kpi(totalMatched, "matched product comparisons"),
-    kpi(avgGap == null ? "–" : pct(-avgGap), "your price vs competitors (avg; negative = you are cheaper)"),
-    kpi(warnings, "price-undercut warnings")));
+  const tabs = [
+    ["pricing", "Pricing recommendations", () => pricingTab(r)],
+    ["insights", "Insights & alerts", () => insightsTab(r)],
+    ["competitors", "Competitors", () => competitorsTab(r, comps, colorOf)],
+    ["history", "History & offers", () => historyTab(r, colorOf)],
+    ["quality", "Data quality", () => qualityTab(r)],
+  ];
+  const nav = h("div", { class: "tabs", role: "tablist" }), body = h("div");
+  const show = id => {
+    charts.forEach(c => c.destroy()); charts = [];
+    [...nav.children].forEach(b => b.classList.toggle("active", b.dataset.id === id));
+    body.innerHTML = ""; body.append(tabs.find(t => t[0] === id)[2]());
+  };
+  tabs.forEach(([id, label]) => nav.append(h("button", { type: "button", class: "tab", role: "tab", "data-id": id, onclick: () => show(id) }, label)));
+  root.append(nav, body);
+  show("pricing");
+}
 
-  const ai = aiCard(r); if (ai) root.append(ai);
-  root.append(h("div", { class: "card" }, h("h2", {}, "Key insights"),
+function insightsTab(r) {
+  const box = h("div");
+  const ai = aiCard(r); if (ai) box.append(ai);
+  box.append(h("div", { class: "card" }, h("h2", {}, "Key insights"),
     h("ul", { class: "insights" }, (r.insights || []).map(i => h("li", {}, h("span", { class: "chip " + i.severity }, i.title), " ", i.text)))));
-
   if ((r.recommendations || []).length) {
-    root.append(h("div", { class: "card" }, h("h2", {}, "Suggested actions"),
+    box.append(h("div", { class: "card" }, h("h2", {}, "Other suggested actions"),
       h("ul", { class: "insights" }, r.recommendations.map(x => h("li", {}, h("span", { class: "chip " + (x.priority === "high" ? "failed" : x.priority === "medium" ? "warning" : "info") }, x.priority), " ", h("b", {}, x.action), h("br"), h("small", { style: "color:var(--muted)" }, x.detail))))));
   }
+  box.append(alertsCard(r));
+  return box;
+}
 
+function competitorsTab(r, comps, colorOf) {
+  const box = h("div");
+  const withMatches = comps.filter(c => c.matched), allSites = Object.values(r.sites);
   const grid = h("div", { class: "grid2" });
-  const withMatches = comps.filter(c => c.matched);
   const c1 = chartCard("Price index vs you", "Average competitor price where you = 100. Below 100 means the competitor is cheaper.");
   const c2 = chartCard("Cheaper, same or costlier than you", "Number of matched products by price position of each competitor.");
-  const allSites = Object.values(r.sites);
   const c3 = chartCard("Products on sale", "Share of each catalogue with a visible discount, and the average discount depth.");
   const c4 = chartCard("Stock status", "Unknown means the site doesn't publish stock. We never guess.");
-  grid.append(c1.el, c2.el, c3.el, c4.el); root.append(grid);
-
-  chart(c1.canvas, { type: "bar", data: { labels: withMatches.map(c => c.name),
-      datasets: [{ label: "Price index", data: withMatches.map(c => c.price_index), backgroundColor: withMatches.map(c => colorOf[c.key]) }] },
+  grid.append(c1.el, c2.el, c3.el, c4.el); box.append(grid);
+  chart(c1.canvas, { type: "bar", data: { labels: withMatches.map(c => c.name), datasets: [{ label: "Price index", data: withMatches.map(c => c.price_index), backgroundColor: withMatches.map(c => colorOf[c.key]) }] },
     options: { maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { suggestedMin: 80, suggestedMax: 120, title: { display: true, text: "You = 100" } } } } });
   chart(c2.canvas, { type: "bar", data: { labels: withMatches.map(c => c.name), datasets: [
-      { label: "Cheaper than you", data: withMatches.map(c => c.cheaper), backgroundColor: "#D55E00" },
-      { label: "About the same (±1%)", data: withMatches.map(c => c.same), backgroundColor: "#9aa5b8" },
-      { label: "Costlier than you", data: withMatches.map(c => c.costlier), backgroundColor: "#009E73" }] },
-    options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true, title: { display: true, text: "Products" } } } } });
+      { label: "Cheaper than you", data: withMatches.map(c => c.cheaper), backgroundColor: "#D55E00" }, { label: "About the same (±1%)", data: withMatches.map(c => c.same), backgroundColor: "#9aa5b8" },
+      { label: "Costlier than you", data: withMatches.map(c => c.costlier), backgroundColor: "#009E73" }] }, options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } } } });
   chart(c3.canvas, { type: "bar", data: { labels: allSites.map(s => s.name), datasets: [
-      { label: "% of products on sale", data: allSites.map(s => s.on_sale_pct || 0), backgroundColor: allSites.map(s => colorOf[s.key] || "#999") },
-      { label: "Avg discount %", data: allSites.map(s => s.avg_discount_pct || 0), backgroundColor: "#8c8c8c" }] },
-    options: { maintainAspectRatio: false, scales: { y: { title: { display: true, text: "%" } } } } });
+      { label: "% of products on sale", data: allSites.map(s => s.on_sale_pct || 0), backgroundColor: allSites.map(s => colorOf[s.key] || "#999") }, { label: "Avg discount %", data: allSites.map(s => s.avg_discount_pct || 0), backgroundColor: "#8c8c8c" }] },
+    options: { maintainAspectRatio: false } });
   chart(c4.canvas, { type: "bar", data: { labels: allSites.map(s => s.name), datasets: [
-      { label: "In stock", data: allSites.map(s => s.in_stock), backgroundColor: "#009E73" },
-      { label: "Out of stock", data: allSites.map(s => s.out_of_stock), backgroundColor: "#D55E00" },
-      { label: "Unknown", data: allSites.map(s => s.unknown_stock), backgroundColor: "#9aa5b8" }] },
-    options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true, title: { display: true, text: "Products" } } } } });
-
-  root.append(priceTable(r, comps));
-  const catComp = categoryCard(r, comps); if (catComp) root.append(catComp);
-  root.append(changesCard(r, colorOf));
-  const off = offersCard(r); if (off) root.append(off);
-  root.append(marketingCard(r));
-  root.append(alertsCard(r));
-  root.append(monitorCard());
-  if ((r.review_matches || []).length) root.append(reviewCard(r));
-  root.append(dataQuality(r));
+      { label: "In stock", data: allSites.map(s => s.in_stock), backgroundColor: "#009E73" }, { label: "Out of stock", data: allSites.map(s => s.out_of_stock), backgroundColor: "#D55E00" },
+      { label: "Unknown", data: allSites.map(s => s.unknown_stock), backgroundColor: "#9aa5b8" }] }, options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } } } });
+  const cat = categoryCard(r, comps); if (cat) box.append(cat);
+  return box;
 }
+
+function historyTab(r, colorOf) {
+  const box = h("div");
+  box.append(changesCard(r, colorOf));
+  const off = offersCard(r); if (off) box.append(off);
+  box.append(marketingCard(r), monitorCard());
+  return box;
+}
+
+function qualityTab(r) {
+  const box = h("div");
+  if ((r.review_matches || []).length) box.append(reviewCard(r));
+  box.append(dataQuality(r));
+  return box;
+}
+
 function kpi(v, label) { return h("div", { class: "kpi" }, h("b", {}, v), h("span", {}, label)); }
 
-function priceTable(r, comps) {
-  const withData = comps.filter(c => c.matched);
-  let sortKey = "title", dir = 1, q = "";
-  const body = h("tbody"), head = h("thead");
-  const cheapestGap = row => Math.min(...Object.values(row.competitors).map(v => v.gap_pct));
-  function draw() {
-    let rows = r.rows.filter(x => x.source.title.toLowerCase().includes(q));
-    rows = [...rows].sort((a, b) => {
-      if (sortKey === "title") return dir * a.source.title.localeCompare(b.source.title);
-      if (sortKey === "yours") return dir * ((a.source.price || 0) - (b.source.price || 0));
-      if (sortKey === "gap") return dir * (cheapestGap(a) - cheapestGap(b));
-      return 0;
-    });
-    body.innerHTML = "";
-    rows.forEach(row => {
-      const s = row.source;
-      body.append(h("tr", {},
-        h("td", { class: "title" }, safeUrl(s.url) ? h("a", { href: s.url, target: "_blank", rel: "noopener noreferrer" }, s.title) : s.title, h("small", {}, [row.brand, row.category].filter(Boolean).join(" · "))),
-        h("td", { class: "num" + (s.in_stock === false ? " oos" : "") }, inr(s.price), s.discount_pct ? h("small", {}, `${s.discount_pct}% off`) : null),
-        withData.map(c => {
-          const v = row.competitors[c.key];
-          if (!v) return h("td", { class: "num" }, "–");
-          const cls = v.gap_pct < -1 ? "cheap" : v.gap_pct > 1 ? "dear" : "";
-          return h("td", { class: "num " + cls + (v.in_stock === false ? " oos" : ""), title: v.title + " (match " + Math.round(v.confidence * 100) + "%)" },
-            inr(v.price), h("small", {}, pct(v.gap_pct), v.low_stock ? " · low stock" : "", v.in_stock === false ? " · out of stock" : ""));
-        }),
-        h("td", {}, row.cheapest ? (comps.find(c => c.key === row.cheapest) || {}).name : h("span", { class: "chip positive" }, "You"))));
-    });
-    if (!rows.length) body.append(h("tr", {}, h("td", { colspan: 3 + withData.length }, "No matching products.")));
-  }
-  const th = (label, key) => h("th", { class: key ? "sortable" : "", onclick: key ? () => { dir = sortKey === key ? -dir : 1; sortKey = key; draw(); } : null }, label + (key ? " ⇅" : ""));
-  head.append(h("tr", {}, th("Product (yours)", "title"), th("Your price", "yours"), withData.map(c => h("th", {}, c.name)), th("Cheapest", "gap")));
-  const search = h("input", { type: "text", placeholder: "Filter products…", "aria-label": "Filter products", oninput: e => { q = e.target.value.toLowerCase(); draw(); } });
-  draw();
-  return h("div", { class: "card" }, h("h2", {}, `Price comparison (${r.rows.length} matched products)`),
-    h("p", { class: "legend" }, "Percent shows the competitor's price relative to yours. ",
-      h("span", { class: "chip failed" }, "red = cheaper than you"), " ", h("span", { class: "chip done" }, "green = costlier than you"), " Hover a price to see the matched product."),
-    h("div", { class: "toolbar" }, search), h("div", { class: "tablewrap" }, h("table", {}, head, body)));
-}
 function alertsCard(r) {
   const levels = ["all", "warning", "risk", "opportunity", "info"];
   let active = "all";
@@ -398,7 +389,7 @@ function monitorCard() {
     try {
       const res = await fetch("/api/monitors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
         source_url: a.source_url, competitor_urls: a.competitor_urls, interval_hours: parseInt(interval.value, 10), notify_email: email.value.trim() || null, telegram_chat_id: tg.value.trim() || null,
-        max_products: parseInt($("#max-products").value, 10) || 100, categories: $("#categories").value.split(",").map(s => s.trim()).filter(Boolean), use_ai: $("#use-ai").checked }) });
+        ...formOptions() }) });
       const data = await res.json();
       if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : (data.detail && data.detail[0] && data.detail[0].msg) || "Could not start monitoring.");
       msg.textContent = "Monitoring started. The first run is in progress; it appears in the Monitors list above.";

@@ -1,6 +1,8 @@
 """FastAPI app: JSON API + the single-page website."""
 from __future__ import annotations
 
+import csv
+import io
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -41,10 +43,16 @@ CHAT_RE = re.compile(r"^(-?\d{3,20}|@\w{3,})$")
 class AnalysisRequest(BaseModel):
     source_url: str
     competitor_urls: list[str] = Field(min_length=1, max_length=5)
-    max_products: int = Field(default=100, ge=10, le=500)
-    match_threshold: float = Field(default=0.85, ge=0.3, le=1.0)
+    max_products: int | None = Field(default=None, ge=0)  # None or 0 = read EVERY product the sites expose
+    match_threshold: float = Field(default=0.80, ge=0.3, le=1.0)
     categories: list[str] = Field(default_factory=list, max_length=10)
     use_ai: bool = True
+    currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")  # override auto-detection
+    rate_limit_per_sec: float = Field(default=2.0, ge=0.2, le=10)
+    tolerance_pct: float = Field(default=3.0, ge=0, le=50)  # within +/- this of the competitor average = keep price
+    max_increase_pct: float = Field(default=5.0, ge=0, le=50)
+    undercut_pct: float = Field(default=1.0, ge=0, le=20)
+    exclude_out_of_stock: bool = True
 
 
 class MonitorRequest(AnalysisRequest):
@@ -124,7 +132,10 @@ def create_app(
         if len(set(labels)) != len(labels):
             raise HTTPException(422, "Each URL must be a different website (duplicates found)")
         cats = [c.strip() for c in req.categories if c.strip()]
-        return source, comps, {"max_products": req.max_products, "categories": cats, "use_ai": req.use_ai, "match_threshold": req.match_threshold}
+        return source, comps, {
+            "max_products": req.max_products or None, "categories": cats, "use_ai": req.use_ai, "match_threshold": req.match_threshold,
+            "currency": (req.currency or "").upper() or None, "rate_limit_per_sec": req.rate_limit_per_sec, "tolerance_pct": req.tolerance_pct,
+            "max_increase_pct": req.max_increase_pct, "undercut_pct": req.undercut_pct, "exclude_out_of_stock": req.exclude_out_of_stock}
 
     @app.post("/api/analyses", status_code=202)
     def create_analysis_endpoint(req: AnalysisRequest) -> dict:
@@ -188,14 +199,112 @@ def create_app(
         return {"analysis_id": aid}
 
     @app.get("/api/analyses/{analysis_id}")
-    def get_analysis(analysis_id: str) -> dict:
+    def get_analysis(analysis_id: str, lite: bool = False) -> dict:
+        """lite=1 leaves out the big per-product lists (use /pricing to page through them) so the dashboard loads fast."""
         with session_scope(engine) as s:
             a = s.get(Analysis, analysis_id)
             if a is None:
                 raise HTTPException(404, "Analysis not found")
-            return {"id": a.id, "status": a.status, "error": a.error, "progress": a.progress, "result": a.result,
-                    "source_url": a.source_url, "competitor_urls": a.competitor_urls,
+            result = a.result
+            if lite and result:
+                result = {k: v for k, v in result.items() if k != "rows"}
+                if result.get("pricing"):
+                    result["pricing"] = {k: v for k, v in result["pricing"].items() if k != "items"}
+            return {"id": a.id, "status": a.status, "error": a.error, "progress": a.progress, "result": result,
+                    "source_url": a.source_url, "competitor_urls": a.competitor_urls, "options": a.options,
                     "created_at": a.created_at.isoformat(), "finished_at": a.finished_at.isoformat() if a.finished_at else None}
+
+    _items_cache: dict[str, tuple[str, list[dict]]] = {}
+
+    def _pricing_items(analysis_id: str) -> tuple[list[dict], dict]:
+        with session_scope(engine) as s:
+            a = s.get(Analysis, analysis_id)
+            if a is None:
+                raise HTTPException(404, "Analysis not found")
+            if a.status in ("queued", "running"):
+                raise HTTPException(409, "The analysis is still running.")
+            stamp = f"{a.finished_at}|{a.status}"
+            cached = _items_cache.get(analysis_id)
+            if cached and cached[0] == stamp:
+                return cached[1], {}
+            items = list(((a.result or {}).get("pricing") or {}).get("items") or [])
+        if len(_items_cache) >= 4:
+            _items_cache.pop(next(iter(_items_cache)))
+        _items_cache[analysis_id] = (stamp, items)
+        return items, {}
+
+    sort_keys = {
+        "gap_desc": (lambda i: i["gap_pct"], True), "gap_asc": (lambda i: i["gap_pct"], False),
+        "price_desc": (lambda i: i["price"], True), "price_asc": (lambda i: i["price"], False),
+        "title": (lambda i: i["title"].lower(), False), "confidence": (lambda i: i["match_confidence"], True),
+        "change_desc": (lambda i: abs(i["change_abs"]), True),
+    }
+
+    def _filter(items: list[dict], q: str, category: str, brand: str, competitor: str, action: str, min_price: float | None, max_price: float | None,
+                min_similarity: float, in_stock: str, sort: str) -> list[dict]:
+        ql = q.strip().lower()
+        out = []
+        for i in items:
+            if ql and ql not in i["title"].lower() and ql not in (i.get("brand") or "").lower() and ql not in (i.get("sku") or "").lower():
+                continue
+            if category and i["category"] != category:
+                continue
+            if brand and (i.get("brand") or "") != brand:
+                continue
+            if competitor and not any(e["competitor_key"] == competitor for e in i["competitors"]):
+                continue
+            if action and i["action"] != action:
+                continue
+            if min_price is not None and i["price"] < min_price:
+                continue
+            if max_price is not None and i["price"] > max_price:
+                continue
+            if min_similarity and i["match_confidence"] * 100 < min_similarity:
+                continue
+            if in_stock == "yes" and i["in_stock"] is False:
+                continue
+            if in_stock == "no" and i["in_stock"] is not False:
+                continue
+            out.append(i)
+        key, rev = sort_keys.get(sort, sort_keys["gap_desc"])
+        out.sort(key=key, reverse=rev)
+        return out
+
+    @app.get("/api/analyses/{analysis_id}/pricing")
+    def pricing_page(analysis_id: str, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=200), q: str = "", category: str = "", brand: str = "",
+                     competitor: str = "", action: str = "", min_price: float | None = None, max_price: float | None = None,
+                     min_similarity: float = Query(0, ge=0, le=100), in_stock: str = "", sort: str = "gap_desc") -> dict:
+        """Filtered, sorted, paginated per-product pricing recommendations (works for catalogues of any size)."""
+        items, _ = _pricing_items(analysis_id)
+        rows = _filter(items, q, category, brand, competitor, action, min_price, max_price, min_similarity, in_stock, sort)
+        start = (page - 1) * page_size
+        cats, brands = {}, {}
+        for i in items:
+            cats[i["category"]] = cats.get(i["category"], 0) + 1
+            if i.get("brand"):
+                brands[i["brand"]] = brands.get(i["brand"], 0) + 1
+        prices = [i["price"] for i in items]
+        return {"total": len(rows), "all": len(items), "page": page, "page_size": page_size, "items": rows[start:start + page_size],
+                "facets": {"categories": sorted(({"name": k, "count": v} for k, v in cats.items()), key=lambda x: -x["count"]),
+                           "brands": sorted(({"name": k, "count": v} for k, v in brands.items()), key=lambda x: -x["count"])[:200],
+                           "price_min": min(prices) if prices else 0, "price_max": max(prices) if prices else 0}}
+
+    @app.get("/api/analyses/{analysis_id}/pricing.csv")
+    def pricing_csv(analysis_id: str, q: str = "", category: str = "", brand: str = "", competitor: str = "", action: str = "",
+                    min_price: float | None = None, max_price: float | None = None, min_similarity: float = 0, in_stock: str = "", sort: str = "gap_desc") -> Response:
+        items, _ = _pricing_items(analysis_id)
+        rows = _filter(items, q, category, brand, competitor, action, min_price, max_price, min_similarity, in_stock, sort)
+        names = sorted({e["competitor_name"] for i in rows for e in i["competitors"]})
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["Product", "Brand", "SKU", "Category", "Size", "Your price", "Competitor average", "Lowest competitor", "Highest competitor", "Gap %", "Action",
+                    "Suggested price", "Change %", "Confidence", "Competitors matched", *[f"{n} price" for n in names], "Reason", "Your URL"])
+        for i in rows:
+            by = {e["competitor_name"]: e["adjusted_price"] for e in i["competitors"]}
+            w.writerow([i["title"], i.get("brand") or "", i.get("sku") or "", i["category"], i.get("size") or "", i["price"], i["market_avg"], i["market_min"], i["market_max"],
+                        i["gap_pct"], i["action"], i["suggested_price"], i["change_pct"], i["confidence"], i["n_competitors"], *[by.get(n, "") for n in names], i["rationale"], i.get("url") or ""])
+        return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="pricing-recommendations-{analysis_id}.csv"'})
 
     @app.get("/api/analyses/{analysis_id}/report.pdf")
     def download_report(analysis_id: str) -> Response:

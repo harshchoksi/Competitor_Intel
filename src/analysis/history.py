@@ -5,6 +5,7 @@ import re
 
 from sqlalchemy import Engine, func, select
 
+from src.analysis.money import fmt
 from src.db.models import Offer, PriceSnapshot, Product, Run, Site
 from src.db.session import session_scope
 
@@ -66,7 +67,7 @@ def compute_changes(engine: Engine, run_id: int, keys: list[str], cap: int) -> d
     return out
 
 
-def history_alerts(changes: dict, names: dict[str, str], source_key: str, drop_alert_pct: float) -> list[dict]:
+def history_alerts(changes: dict, names: dict[str, str], source_key: str, drop_alert_pct: float, currency: str = "INR") -> list[dict]:
     alerts = []
     for key, c in changes.get("sites", {}).items():
         if key == source_key:
@@ -75,7 +76,7 @@ def history_alerts(changes: dict, names: dict[str, str], source_key: str, drop_a
         for d in c["price_drops"]:
             if d["change_pct"] <= -drop_alert_pct:
                 alerts.append({"type": "price_drop", "level": "warning" if d["change_pct"] <= -10 else "info", "site": n, "product": d["title"], "value": d["change_pct"],
-                               "message": f"{n} cut the price of {d['title']} by {abs(d['change_pct']):.0f}% (₹{d['old']:,.0f} to ₹{d['new']:,.0f}) since the last analysis"})
+                               "message": f"{n} cut the price of {d['title']} by {abs(d['change_pct']):.0f}% ({fmt(d['old'], currency)} to {fmt(d['new'], currency)}) since the last analysis"})
         for t in c["new_offers"]:
             alerts.append({"type": "new_offer", "level": "info", "site": n, "product": "", "message": f"{n} started a new offer: {t[:120]}"})
         if c["new_count"] >= 3 and not c["cap_reached"]:
@@ -135,6 +136,6 @@ def attach_history(engine: Engine, result: dict, run_id: int, cap: int, drop_ale
     result["changes"] = changes
     result["price_history"] = price_history(engine, result) if changes["has_history"] else None
     result["change_frequency"] = change_frequency(engine, list(result["sites"])) if changes["has_history"] else {}
-    result["alerts"] += history_alerts(changes, names, result["source_key"], drop_alert_pct)
+    result["alerts"] += history_alerts(changes, names, result["source_key"], drop_alert_pct, result.get("currency", "INR"))
     order = {"warning": 0, "risk": 1, "opportunity": 2, "info": 3}
     result["alerts"].sort(key=lambda a: (order[a["level"]], -abs(a.get("value", 0))))

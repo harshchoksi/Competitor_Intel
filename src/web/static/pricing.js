@@ -1,0 +1,152 @@
+"use strict";
+// Pricing recommendations tab: risk/opportunity banners, product-type analysis, charts and the paginated product explorer.
+// Uses helpers from app.js (h, $, money, pct, safeUrl, chart, chartCard, currentId, charts).
+
+const ACTION_LABEL = { decrease: "Reduce price", increase: "Raise price", hold: "Keep price" };
+const ACTION_CLASS = { decrease: "failed", increase: "done", hold: "info" };
+
+function pricingTab(r) {
+  facets = null; ctl = {}; Object.assign(F, { q: "", category: "", brand: "", competitor: "", action: "", min_price: "", max_price: "", min_similarity: 0, in_stock: "", sort: "gap_desc", page: 1 });
+  const p = r.pricing || {}, s = p.summary || {}, box = h("div");
+  const opt = p.settings || {};
+  box.append(h("div", { class: "kpis" },
+    kpi((s.matched_products || 0).toLocaleString(), `of your ${(s.source_products || 0).toLocaleString()} products matched (${s.coverage_pct ?? 0}% coverage)`),
+    kpi((r.competitors || []).length, "competitors compared"),
+    kpi((s.competitor_matches || 0).toLocaleString(), "similar competitor products found"),
+    kpi(s.avg_match_confidence == null ? "–" : s.avg_match_confidence + "%", "average match confidence"),
+    kpi(s.cheapest_count || 0, "products where you are already cheapest")));
+
+  // --- risk + opportunity
+  const risk = h("div", { class: "card banner risk" }), opp = h("div", { class: "card banner opp" });
+  risk.append(h("div", { class: "eyebrow" }, "Price risk"),
+    h("h2", {}, `${(s.decrease || 0).toLocaleString()} products are priced above the competitor average`),
+    h("p", { class: "note" }, `Combined gap per unit: ${money(s.overpriced_gap_total)}. Suggested: lower each to about ${opt.undercut_pct ?? 1}% under the competitor average.`),
+    h("div", { id: "risk-list" }, h("p", { class: "note" }, "Loading…")));
+  opp.append(h("div", { class: "eyebrow" }, "Opportunity"),
+    h("h2", {}, `${(s.increase || 0).toLocaleString()} products are priced well below the competitor average`),
+    h("p", { class: "note" }, `Headroom per unit: ${money(s.headroom_total)}. Suggested: raise by up to ${opt.max_increase_pct ?? 5}%, staying under the market.`),
+    h("div", { id: "opp-list" }, h("p", { class: "note" }, "Loading…")));
+  box.append(h("div", { class: "grid2" }, risk, opp));
+  fillTop("decrease", "gap_desc", "#risk-list", it => `Cut ${money(-it.change_abs)}`);
+  fillTop("increase", "gap_asc", "#opp-list", it => `Raise ${money(it.change_abs)}`);
+
+  // --- product-type analysis
+  const cats = p.categories || [];
+  if (cats.length) {
+    const body = h("tbody");
+    cats.forEach(c => body.append(h("tr", { class: "clickrow", title: "Click to filter the products below", onclick: () => { F.category = c.category; F.page = 1; syncControls(); loadExplorer(); document.getElementById("explorer").scrollIntoView({ behavior: "smooth" }); } },
+      h("td", {}, h("b", {}, c.category)), h("td", { class: "num" }, c.products), h("td", { class: "num " + (c.avg_gap_pct > 3 ? "cheap" : c.avg_gap_pct < -3 ? "dear" : "") }, pct(c.avg_gap_pct)),
+      h("td", { class: "num" }, money(c.avg_your_price)), h("td", { class: "num" }, money(c.avg_market_price)),
+      h("td", { class: "num" }, c.decrease + (c.avg_decrease_pct != null ? ` (${pct(c.avg_decrease_pct)})` : "")), h("td", { class: "num" }, c.increase + (c.avg_increase_pct != null ? ` (${pct(c.avg_increase_pct)})` : "")),
+      h("td", { style: "white-space:normal" }, c.verdict))));
+    box.append(h("div", { class: "card" }, h("h2", {}, "Matched products by type"),
+      h("p", { class: "note" }, "Products are grouped by what they are (meat, dairy, drinks…), even when stores name them differently. Gap = your average price vs the competitor average for the same products. Click a row to see its products."),
+      h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Product type", "Matched", "Your gap", "Your avg price", "Market avg", "Reduce", "Raise", "Advice"].map(x => h("th", {}, x)))), body))));
+  }
+
+  // --- charts
+  const g = h("div", { class: "grid2" });
+  const ca = chartCard("Price position", "Share of matched products priced above, in line with, or below the competitor average.");
+  const cb = chartCard("Match confidence", "How sure we are that competitor products are the same as yours.");
+  const cc = chartCard("Average gap by product type", "Positive = you are more expensive than competitors.");
+  const cd = chartCard("Matches per competitor", "How many of your products each competitor also sells.");
+  g.append(ca.el, cb.el, cc.el, cd.el); box.append(g);
+  chart(ca.canvas, { type: "doughnut", data: { labels: ["Above average", "In line", "Below average"], datasets: [{ data: [s.above || 0, s.aligned || 0, s.below || 0], backgroundColor: ["#ef4444", "#a8896e", "#10b981"] }] }, options: { maintainAspectRatio: false } });
+  const order = ["<80", "80-85", "85-90", "90-95", "95-100"], bk = s.confidence_buckets || {};
+  chart(cb.canvas, { type: "bar", data: { labels: order.map(o => o + "%"), datasets: [{ label: "Matches", data: order.map(o => bk[o] || 0), backgroundColor: "#f59e0b" }] }, options: { maintainAspectRatio: false, plugins: { legend: { display: false } } } });
+  const topCats = cats.slice(0, 12);
+  chart(cc.canvas, { type: "bar", data: { labels: topCats.map(c => c.category), datasets: [{ label: "Avg gap %", data: topCats.map(c => c.avg_gap_pct), backgroundColor: topCats.map(c => c.avg_gap_pct > 0 ? "#ef4444" : "#10b981") }] }, options: { indexAxis: "y", maintainAspectRatio: false, plugins: { legend: { display: false } } } });
+  const names = {}; (r.competitors || []).forEach(c => names[c.key] = c.name);
+  const mp = s.matches_per_competitor || {};
+  chart(cd.canvas, { type: "bar", data: { labels: Object.keys(mp).map(k => names[k] || k), datasets: [{ label: "Products", data: Object.values(mp), backgroundColor: OKABE }] }, options: { maintainAspectRatio: false, plugins: { legend: { display: false } } } });
+
+  box.append(explorerCard(r, p));
+  setTimeout(loadExplorer, 0); // the tab is attached to the page after this function returns
+  return box;
+}
+
+async function fillTop(action, sort, sel, label) {
+  try {
+    const d = await (await fetch(`/api/analyses/${currentId}/pricing?action=${action}&sort=${sort}&page_size=8`)).json();
+    const box = $(sel); if (!box) return; box.innerHTML = "";
+    if (!d.items.length) return box.append(h("p", { class: "note" }, "None. Nothing to do here."));
+    d.items.forEach(it => box.append(h("div", { class: "toprow" }, thumb(it), h("div", { class: "grow" }, h("b", {}, it.title), h("small", {}, `Market avg ${money(it.market_avg)} · your price ${money(it.price)} (${pct(it.gap_pct)})`)),
+      h("span", { class: "chip " + ACTION_CLASS[action] }, label(it)))));
+  } catch { /* non-critical */ }
+}
+const thumb = it => safeUrl(it.image) ? h("img", { class: "thumb", src: it.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" }) : h("div", { class: "thumb ph" }, (it.title || "?")[0]);
+
+// ---------- explorer ----------
+const F = { q: "", category: "", brand: "", competitor: "", action: "", min_price: "", max_price: "", min_similarity: 0, in_stock: "", sort: "gap_desc", page: 1, page_size: 20 };
+let facets = null, ctl = {};
+
+function explorerCard(r, p) {
+  const sel = (id, label, opts) => { const el = h("select", { id, "aria-label": label, onchange: e => { F[id.replace("f-", "")] = e.target.value; F.page = 1; loadExplorer(); } }, opts.map(([v, t]) => h("option", { value: v }, t))); ctl[id] = el; return el; };
+  const text = (id, ph, key, type = "text") => { const el = h("input", { id, type, placeholder: ph, "aria-label": ph, oninput: debounce(e => { F[key] = e.target.value; F.page = 1; loadExplorer(); }, 300) }); ctl[id] = el; return el; };
+  const comps = [["", "All competitors"], ...(r.competitors || []).map(c => [c.key, c.name])];
+  const bar = h("div", { class: "filters" },
+    text("f-q", "Search product, brand, SKU…", "q"),
+    sel("f-category", "Product type", [["", "All product types"], ...((p.categories || []).map(c => [c.category, `${c.category} (${c.products})`]))]),
+    sel("f-brand", "Brand", [["", "All brands"]]),
+    sel("f-competitor", "Competitor", comps),
+    sel("f-action", "Recommended action", [["", "Any action"], ["decrease", "Reduce price"], ["increase", "Raise price"], ["hold", "Keep price"]]),
+    sel("f-in_stock", "Availability", [["", "Any availability"], ["yes", "Not out of stock"], ["no", "Out of stock"]]),
+    sel("f-min_similarity", "Minimum match", [["0", "Any match %"], ["80", "≥ 80%"], ["90", "≥ 90%"], ["95", "≥ 95%"]]),
+    text("f-min_price", "Min price", "min_price", "number"), text("f-max_price", "Max price", "max_price", "number"),
+    sel("f-sort", "Sort", [["gap_desc", "Most overpriced first"], ["gap_asc", "Most underpriced first"], ["change_desc", "Biggest price change"], ["price_desc", "Price: high to low"], ["price_asc", "Price: low to high"], ["confidence", "Best match first"], ["title", "Name A–Z"]]),
+    h("button", { type: "button", class: "ghost", onclick: () => { Object.assign(F, { q: "", category: "", brand: "", competitor: "", action: "", min_price: "", max_price: "", min_similarity: 0, in_stock: "", sort: "gap_desc", page: 1 }); syncControls(); loadExplorer(); } }, "Reset"));
+  ctl["f-min_similarity"].addEventListener("change", e => { F.min_similarity = parseInt(e.target.value, 10) || 0; });
+  return h("div", { class: "card", id: "explorer" }, h("h2", {}, "Product-by-product recommendations"),
+    h("p", { class: "note" }, "Each of your products with the competitor products we matched to it, the market average, and a suggested price. Competitor prices are scaled to your pack size when sizes differ."),
+    bar, h("div", { id: "ex-count", class: "note" }), h("div", { id: "ex-list" }), h("div", { id: "ex-pager", class: "pager" }));
+}
+function syncControls() {
+  Object.entries({ "f-q": "q", "f-category": "category", "f-brand": "brand", "f-competitor": "competitor", "f-action": "action", "f-in_stock": "in_stock", "f-min_similarity": "min_similarity", "f-min_price": "min_price", "f-max_price": "max_price", "f-sort": "sort" })
+    .forEach(([id, k]) => { if (ctl[id]) ctl[id].value = F[k]; });
+}
+function debounce(fn, ms) { let t; return e => { clearTimeout(t); t = setTimeout(() => fn(e), ms); }; }
+function qs() { const u = new URLSearchParams(); Object.entries(F).forEach(([k, v]) => { if (v !== "" && v != null && v !== 0) u.set(k, v); }); return u.toString(); }
+
+let exSeq = 0;
+async function loadExplorer() {
+  const list = $("#ex-list"); if (!list) return;
+  const my = ++exSeq;
+  list.style.opacity = .5;
+  try {
+    const d = await (await fetch(`/api/analyses/${currentId}/pricing?${qs()}`)).json();
+    if (my !== exSeq) return;
+    if (!facets) { facets = d.facets; const b = ctl["f-brand"]; if (b) facets.brands.forEach(x => b.append(h("option", { value: x.name }, `${x.name} (${x.count})`))); }
+    list.innerHTML = ""; list.style.opacity = 1;
+    $("#ex-count").textContent = `Showing ${d.total ? (d.page - 1) * d.page_size + 1 : 0}–${Math.min(d.page * d.page_size, d.total)} of ${d.total.toLocaleString()} matched products` + (d.total !== d.all ? ` (filtered from ${d.all.toLocaleString()})` : "");
+    if (!d.items.length) list.append(h("p", { class: "note" }, "No products match these filters."));
+    d.items.forEach(it => list.append(productCard(it)));
+    const pages = Math.max(1, Math.ceil(d.total / d.page_size)), pg = $("#ex-pager"); pg.innerHTML = "";
+    const go = n => h("button", { type: "button", class: "ghost" + (n === d.page ? " cur" : ""), disabled: n === d.page, onclick: () => { F.page = n; loadExplorer(); $("#explorer").scrollIntoView({ behavior: "smooth" }); } }, n);
+    const nums = [...new Set([1, 2, d.page - 1, d.page, d.page + 1, pages - 1, pages])].filter(n => n >= 1 && n <= pages).sort((a, b) => a - b);
+    nums.forEach((n, i) => { if (i && n - nums[i - 1] > 1) pg.append(h("span", {}, "…")); pg.append(go(n)); });
+  } catch (e) { list.style.opacity = 1; list.innerHTML = ""; list.append(h("p", { class: "error" }, "Could not load products.")); }
+}
+
+function productCard(it) {
+  const confCls = it.confidence === "high" ? "done" : it.confidence === "medium" ? "info" : "warning";
+  const matches = it.competitors.map(e => h("li", {},
+    h("div", { class: "grow" }, safeUrl(e.url) ? h("a", { href: e.url, target: "_blank", rel: "noopener noreferrer" }, e.title) : e.title,
+      h("small", {}, `${e.competitor_name} · match ${Math.round(e.confidence * 100)}%`, e.size_adjusted ? " · scaled to your size" : "", e.in_stock === false ? " · out of stock" : e.low_stock ? " · low stock" : "")),
+    h("span", { class: "num" + (e.in_stock === false ? " oos" : "") }, money(e.adjusted_price), e.size_adjusted ? h("small", {}, `listed ${money(e.price)}`) : null)));
+  return h("article", { class: "pcard" },
+    thumb(it),
+    h("div", { class: "pmain" },
+      h("div", { class: "phead" },
+        h("div", { class: "grow" }, h("h3", {}, safeUrl(it.url) ? h("a", { href: it.url, target: "_blank", rel: "noopener noreferrer" }, it.title) : it.title),
+          h("small", {}, [it.category, it.brand, it.size, it.sku && "SKU " + it.sku].filter(Boolean).join(" · "))),
+        h("div", { class: "yourprice" }, h("b", {}, money(it.price)), h("small", {}, it.in_stock === false ? "Out of stock" : it.in_stock ? "In stock" : ""))),
+      h("details", { class: "matches" }, h("summary", {}, `${it.n_matches} matching product${it.n_matches === 1 ? "" : "s"} at competitors · market average ${money(it.market_avg)} (${money(it.market_min)} – ${money(it.market_max)})`),
+        h("ul", { class: "mlist" }, matches),
+        h("small", { class: "why" }, "Why matched: ", [...new Set(it.competitors.flatMap(e => e.reasons))].slice(0, 5).join("; "))),
+      h("div", { class: "reco " + it.action },
+        h("div", {}, h("span", { class: "chip " + ACTION_CLASS[it.action] }, ACTION_LABEL[it.action]), " ",
+          it.action !== "hold" ? h("b", {}, `${money(it.price)} → ${money(it.suggested_price)} (${pct(it.change_pct)})`) : null,
+          h("span", { class: "chip " + confCls, style: "float:right", title: "Based on number of competitors, match quality and price spread" }, it.confidence + " confidence")),
+        h("p", {}, it.rationale),
+        it.flags.length ? h("ul", { class: "flags" }, it.flags.map(f => h("li", {}, f))) : null)));
+}

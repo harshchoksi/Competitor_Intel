@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import statistics
+from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from src.ads.links import ad_library_links
-from src.analysis.matching import CategoryMatch, Match, match_by_category, match_products
+from src.analysis.matching import Match, match_by_category, match_profiles
+from src.analysis.money import fmt
+from src.analysis.pricing import PricingOptions, build_pricing
+from src.analysis.semantic import Embedder, build_profiles, load_embedder
 from src.analysis.types import SiteData
 from src.scrapers.base import ProductRecord
 
@@ -93,7 +98,8 @@ def compare(source: SiteData, comps: list[SiteData], matches: dict[str, list[Mat
     return out_rows, per_comp
 
 
-def build_alerts(source: SiteData, comps: list[SiteData], rows: list[dict], undercut_alert_pct: float) -> list[dict]:
+def build_alerts(source: SiteData, comps: list[SiteData], rows: list[dict], undercut_alert_pct: float, currency: str = "INR") -> list[dict]:
+    m = lambda v: fmt(v, currency, 0 if currency == "INR" else None)  # noqa: E731
     names = {c.key: c.name for c in comps}
     alerts: list[dict] = []
     for r in rows:
@@ -101,13 +107,13 @@ def build_alerts(source: SiteData, comps: list[SiteData], rows: list[dict], unde
         for k, v in r["competitors"].items():
             if v["gap_pct"] <= -undercut_alert_pct:
                 alerts.append({"type": "undercut", "level": "warning", "site": names[k], "product": title, "value": v["gap_pct"],
-                               "message": f"{names[k]} is {abs(v['gap_pct']):.0f}% cheaper on {title} (₹{v['price']:,.0f} vs your ₹{r['source']['price']:,.0f})"})
+                               "message": f"{names[k]} is {abs(v['gap_pct']):.0f}% cheaper on {title} ({m(v['price'])} vs your {m(r['source']['price'])})"})
             if v["in_stock"] is False and r["source"]["in_stock"] is True:
                 alerts.append({"type": "competitor_out_of_stock", "level": "opportunity", "site": names[k], "product": title,
                                "message": f"{names[k]} is out of stock on {title} while you have it. Consider promoting it"})
             elif v["in_stock"] is True and r["source"]["in_stock"] is False:
                 alerts.append({"type": "you_out_of_stock", "level": "risk", "site": names[k], "product": title,
-                               "message": f"You are out of stock on {title}, but {names[k]} has it at ₹{v['price']:,.0f}"})
+                               "message": f"You are out of stock on {title}, but {names[k]} has it at {m(v['price'])}"})
             if v["low_stock"]:
                 alerts.append({"type": "competitor_low_stock", "level": "info", "site": names[k], "product": title,
                                "message": f"{names[k]} shows low stock on {title}"})
@@ -300,14 +306,35 @@ def signal_recommendations(sites: list[SiteData]) -> list[dict]:
     return recs
 
 
-def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_alert_pct: float = 5.0) -> dict:
+def dominant_currency(sites: list[SiteData], default: str = "INR") -> tuple[str, list[str]]:
+    """Most common currency among the products read, plus the names of sites that use a different one."""
+    per_site: dict[str, str] = {}
+    for sd in sites:
+        c = Counter(p.currency for p in sd.products if p.currency).most_common(1)
+        if c:
+            per_site[sd.name] = c[0][0].upper()
+    if not per_site:
+        return default, []
+    main = Counter(per_site.values()).most_common(1)[0][0]
+    source = next((s for s in sites if s.is_source), None)
+    if source and per_site.get(source.name):
+        main = per_site[source.name]  # your own currency is the reference
+    return main, [n for n, cur in per_site.items() if cur != main]
+
+
+MatchVerifier = Callable[[list[Match], SiteData, SiteData], list[Match]]
+
+
+def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_alert_pct: float = 5.0, currency: str | None = None,
+            pricing_options: PricingOptions | None = None, embedder: Embedder | None | str = "auto", verifier: MatchVerifier | None = None) -> dict:
+    """Everything the dashboard/report shows. `verifier` (optional) re-judges borderline matches, e.g. with an LLM."""
     source = next(s for s in sites if s.is_source)
     comps = [s for s in sites if not s.is_source]
     ok_comps = [c for c in comps if c.status == "ok"]
     stats = {s.key: site_stats(s) for s in sites if s.status == "ok"}
     result: dict = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "source_key": source.key, "currency": "INR", "match_threshold": match_threshold,
+        "source_key": source.key, "currency": "INR", "currency_mismatch": [], "match_threshold": match_threshold,
         "sites": stats,
         "data_quality": [
             {"key": s.key, "name": s.name, "role": "source" if s.is_source else "competitor", "status": s.status,
@@ -321,11 +348,21 @@ def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_al
         "social": {sd.key: {"links": (sd.signals or {}).get("social_links", {}), "youtube": (sd.social or {}).get("youtube")} for sd in sites if sd.signals or sd.social},
         "ad_links": {sd.key: ad_library_links(sd.name, ((sd.signals or {}).get("social_links", {}).get("facebook") or {}).get("handle")) for sd in sites},
         "recommendations": [], "price_points": {}, "discount_points": {}, "radar": {"axes": [], "omitted": {}, "series": {}},
+        "pricing": {"settings": {}, "currency": "INR", "summary": {}, "categories": [], "items": []},
     }
+    cur, mismatch = dominant_currency([s for s in sites if s.status == "ok"], currency or "INR")
+    result["currency"] = (currency or cur).upper()
+    result["currency_mismatch"] = mismatch if not currency else []
     if not result["comparison_available"]:
         return result
 
-    matches = {c.key: match_products(source.products, c.products, match_threshold) for c in ok_comps}
+    emb = load_embedder() if embedder == "auto" else embedder
+    src_profiles = build_profiles(source.products)  # built once, reused for every competitor
+    matches = {c.key: match_profiles(src_profiles, c.products, match_threshold, embedder=emb) for c in ok_comps}  # type: ignore[arg-type]
+    if verifier is not None:
+        for c in ok_comps:
+            matches[c.key] = verifier(matches[c.key], source, c)
+    result["pricing"] = build_pricing(source, ok_comps, matches, currency=result["currency"], options=pricing_options)
     # Category-level comparison (works for brand-vs-brand with different product names)
     result["category_comparisons"] = {
         c.key: [
@@ -353,8 +390,11 @@ def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_al
     failed = [c for c in comps if c.status != "ok"]
     result["rows"] = rows
     result["competitors"] = list(per_comp.values())
-    result["alerts"] = build_alerts(source, ok_comps, rows, undercut_alert_pct)
+    result["alerts"] = build_alerts(source, ok_comps, rows, undercut_alert_pct, result["currency"])
     result["insights"] = build_insights(stats, per_comp, rows, source, failed) + signal_insights(sites) + social_insights(sites)
+    if result["currency_mismatch"]:
+        result["insights"].insert(0, {"title": "Different currencies", "severity": "warning",
+                                      "text": f"{', '.join(result['currency_mismatch'])} appear to price in a different currency than yours ({result['currency']}). Prices are NOT converted, so comparisons with those sites are unreliable. Set the currency option if this is wrong."})
     result["price_points"] = {k: sorted(p.price for p in sd.products if p.price)[:500] for sd in sites if sd.status == "ok" for k in [sd.key]}
     result["discount_points"] = {sd.key: [d for p in sd.products if (d := discount_pct(p)) is not None] for sd in sites if sd.status == "ok"}
     result["radar"] = radar_data(stats, rows, source.key, [c.key for c in ok_comps])
@@ -373,6 +413,7 @@ def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_al
                     "source_price": source.products[m.source_idx].price, "competitor_price": c.products[m.comp_idx].price,
                 })
     result["review_matches"].sort(key=lambda r: -r["confidence"])
+    del result["review_matches"][300:]  # the dashboard shows the best few; keep the stored result small
     result["recommendations"] = build_recommendations(result["alerts"], rows, stats, per_comp, source, comps, len(result["review_matches"]), undercut_alert_pct)
     result["recommendations"] += signal_recommendations(sites)
     result["recommendations"].sort(key=lambda r: {"high": 0, "medium": 1, "low": 2}[r["priority"]])

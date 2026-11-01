@@ -72,3 +72,9 @@ def cfg():
 def _no_real_browser(monkeypatch):
     """Tests never launch Chromium; the browser fallback is exercised with fakes."""
     monkeypatch.setenv("COMPETITOR_INTEL_BROWSER", "off")
+
+
+@pytest.fixture(autouse=True)
+def _no_embedding_model(monkeypatch):
+    """Tests are deterministic and offline: never load a sentence-embedding model."""
+    monkeypatch.setenv("SEMANTIC_EMBEDDINGS", "off")

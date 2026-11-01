@@ -76,8 +76,43 @@ def esc(x) -> str:
     return escape(str(x)) if x is not None else ""
 
 
+_CURRENCY = {"v": "INR"}  # set per report in build_pdf
+
+
 def inr(v) -> str:
-    return "–" if v is None else f"₹{v:,.0f}"
+    """Money in the report's currency (name kept for the older call sites)."""
+    from src.analysis.money import fmt
+
+    return "–" if v is None else fmt(v, _CURRENCY["v"], 0 if _CURRENCY["v"] == "INR" else None)
+
+
+def _pricing_block(result: dict, S) -> list:
+    """Top price cuts and price rises from the per-product recommendations."""
+    p = result.get("pricing") or {}
+    items = p.get("items") or []
+    s = p.get("summary") or {}
+    if not items:
+        return []
+    out: list = [Paragraph(
+        f"{s.get('matched_products', 0):,} of your {s.get('source_products', 0):,} products were matched to competitors "
+        f"({s.get('competitor_matches', 0):,} competitor products). Suggested: reduce {s.get('decrease', 0):,}, raise {s.get('increase', 0):,}, keep {s.get('hold', 0):,}. "
+        "Averages use competitor prices scaled to your pack size; out-of-stock competitor prices are ignored when an in-stock price exists.", S["caption"]), Spacer(1, 3 * mm)]
+    for title, action, reverse in (("Biggest price reductions suggested", "decrease", True), ("Biggest price rises suggested", "increase", False)):
+        rows = sorted((i for i in items if i["action"] == action), key=lambda i: i["gap_pct"], reverse=reverse)[:20]
+        if not rows:
+            continue
+        data = [[Paragraph(h, S["cellb"]) for h in ("Product", "Your price", "Market avg", "Suggested", "Change", "Competitors")]]
+        for i in rows:
+            data.append([Paragraph(esc(i["title"][:70]), S["cell"]), Paragraph(inr(i["price"]), S["cell"]), Paragraph(inr(i["market_avg"]), S["cell"]),
+                         Paragraph(inr(i["suggested_price"]), S["cell"]), Paragraph(f"{i['change_pct']:+.1f}%", S["cell"]), Paragraph(str(i["n_competitors"]), S["cell"])])
+        out += [Paragraph(title, S["H2"]), _table(data, [CONTENT_W * 0.40, CONTENT_W * 0.12, CONTENT_W * 0.12, CONTENT_W * 0.13, CONTENT_W * 0.11, CONTENT_W * 0.12]), Spacer(1, 4 * mm)]
+    cats = p.get("categories") or []
+    if cats:
+        data = [[Paragraph(h, S["cellb"]) for h in ("Product type", "Matched", "Your gap", "Advice")]]
+        for c in cats[:15]:
+            data.append([Paragraph(esc(c["category"]), S["cell"]), Paragraph(str(c["products"]), S["cell"]), Paragraph(f"{c['avg_gap_pct']:+.1f}%", S["cell"]), Paragraph(esc(c["verdict"]), S["cell"])])
+        out += [Paragraph("By product type", S["H2"]), _table(data, [CONTENT_W * 0.28, CONTENT_W * 0.12, CONTENT_W * 0.12, CONTENT_W * 0.48])]
+    return out
 
 
 def _fmt_date(iso: str | None) -> str:
@@ -343,6 +378,7 @@ def _changes_block(result: dict, charts: dict, S) -> list:
 
 def build_pdf(result: dict, meta: dict | None = None) -> bytes:
     """result: output of analyze() plus the optional ai/changes/history parts; meta: {finished_at, ...}."""
+    _CURRENCY["v"] = result.get("currency") or "INR"
     if not result.get("comparison_available"):
         raise ValueError("No comparison available: the report needs your site and at least one competitor to have been read.")
     register_fonts()
@@ -390,6 +426,11 @@ def build_pdf(result: dict, meta: dict | None = None) -> bytes:
                          Paragraph(f"<b>{esc(r['action'])}</b><br/><font color='#5d6678'>{esc(r['detail'])}</font>", S["cell"])])
         story.append(_table(data, [20 * mm, CONTENT_W - 20 * mm]))
     story.append(PageBreak())
+
+    # ---- pricing recommendations
+    block = _pricing_block(result, S)
+    if block:
+        story += [Paragraph(f"{next(counter)}. Pricing recommendations", S["H1"]), *block, PageBreak()]
 
     # ---- price comparison
     story.append(Paragraph(f"{next(counter)}. Price comparison", S["H1"]))

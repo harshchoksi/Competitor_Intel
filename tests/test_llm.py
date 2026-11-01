@@ -5,7 +5,7 @@ import pytest
 
 from src.analysis.metrics import analyze
 from src.analysis.types import SiteData
-from src.llm.gemini import GeminiClient, LLMError, parse_json_object
+from src.llm.gemini import DEFAULT_MODEL, GeminiClient, LLMError, parse_json_object
 from src.llm.insights import allowed_numbers, build_llm_input, generate_ai_insights, ungrounded
 from src.scrapers.base import ProductRecord
 
@@ -46,7 +46,7 @@ def test_gemini_success_and_key_handling():
 
     assert client_with(handler).generate_json("sys", "prompt") == {"a": 1}
     assert seen["key"] == "secret-key-123" and "secret-key-123" not in seen["url"]
-    assert seen["url"].endswith("/models/gemini-2.5-flash:generateContent")
+    assert seen["url"].endswith(f"/models/{DEFAULT_MODEL}:generateContent")
     assert seen["body"]["generationConfig"]["responseMimeType"] == "application/json" and seen["body"]["systemInstruction"]["parts"][0]["text"] == "sys"
 
 
