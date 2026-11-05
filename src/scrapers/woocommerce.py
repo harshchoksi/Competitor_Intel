@@ -61,11 +61,15 @@ class WooCommerceScraper(BaseScraper):
     def scrape(self) -> list[ProductRecord]:
         products: list[ProductRecord] = []
         seen_ids: set[str] = set()
-        page = 1
-        while len(products) < self.max_products and not self.out_of_time():
-            res = self.client.get(
-                f"{self.origin}/wp-json/wc/store/v1/products", params={"per_page": PER_PAGE, "page": page}
-            )
+
+        def fetch(page: int):
+            return self.client.get(f"{self.origin}/wp-json/wc/store/v1/products", params={"per_page": PER_PAGE, "page": page}, rate=self.feed_rate())
+
+        for page, res in self.paged(fetch):
+            if len(products) >= self.max_products or self.out_of_time():
+                break
+            if res is not None and res.status_code == 400 and page > 1:  # WooCommerce answers 400 for a page number past the end
+                break
             if res is None or not res.ok:
                 if page == 1:
                     why = "unreachable or blocked" if res is None else f"HTTP {res.status_code}"
@@ -91,5 +95,4 @@ class WooCommerceScraper(BaseScraper):
             self.report(len(products))
             if len(items) < PER_PAGE or new_on_page == 0:
                 break
-            page += 1
         return products

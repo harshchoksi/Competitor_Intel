@@ -11,6 +11,7 @@ import re
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from rapidfuzz import fuzz
 
@@ -142,7 +143,23 @@ def _normalize_leaf(raw: str) -> str | None:
     return None
 
 
+_PHRASE_RX: list[tuple[re.Pattern, str]] | None = None
+
+
+def _phrase_patterns() -> list[tuple[re.Pattern, str]]:
+    """Longest phrases first ("sports bra" before "bra"), compiled once instead of on every product."""
+    global _PHRASE_RX
+    if _PHRASE_RX is None:
+        _PHRASE_RX = [(re.compile(r"\b" + re.escape(ph.replace("_", " ")) + r"\b"), _NORM_MAP[ph]) for ph in sorted(_NORM_MAP, key=len, reverse=True)]
+    return _PHRASE_RX
+
+
 def _infer_category(p: ProductRecord) -> str | None:
+    return _infer_category_cached(p.category or "", tuple(p.tags or ()), p.title)
+
+
+@lru_cache(maxsize=200_000)
+def _infer_category_cached(category: str, tags: tuple, title: str) -> str | None:
     """Return the best available category label for a product, normalised.
 
     Strategy:
@@ -153,7 +170,7 @@ def _infer_category(p: ProductRecord) -> str | None:
        then fall back to the first tag that looks like a product type.
     3. Last resort: scan the product title for known category keywords.
     """
-    raw = (p.category or "").strip()
+    raw = category.strip()
     if raw:
         # Split on hierarchy separators and take the most specific (last) non-empty part
         parts = [x.strip() for x in _HIERARCHY_SEP.split(raw) if x.strip()]
@@ -163,7 +180,7 @@ def _infer_category(p: ProductRecord) -> str | None:
                 return normalized
 
     # Fall back to tags
-    for tag in p.tags:
+    for tag in tags:
         tag = tag.strip()
         if not tag or _TAG_SKIP.search(tag) or len(tag) < 3 or len(tag) > 50:
             continue
@@ -178,11 +195,10 @@ def _infer_category(p: ProductRecord) -> str | None:
             return tag.title()
 
     # Last resort: scan product title for known category keywords
-    title_lower = p.title.lower()
-    # Try multi-word phrases first (e.g. "sports bra" before "bra")
-    for phrase in sorted(_NORM_MAP, key=len, reverse=True):
-        if re.search(r"\b" + re.escape(phrase.replace("_", " ")) + r"\b", title_lower):
-            return _NORM_MAP[phrase]
+    title_lower = title.lower()
+    for rx, label in _phrase_patterns():
+        if rx.search(title_lower):
+            return label
 
     return None
 

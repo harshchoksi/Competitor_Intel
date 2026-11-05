@@ -26,3 +26,5 @@ services:
         value: "off"
       - key: GEMINI_API_KEY
         sync: false                # you enter it in the Render dashboard
+      - key: SCRAPER_PROXY_URL     # optional: only used for sites that block this server (see DEPLOY_RENDER.md)
+        sync: false

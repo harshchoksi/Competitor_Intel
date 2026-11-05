@@ -62,6 +62,9 @@ class ScrapingSettings(BaseModel):
     rate_limit_per_sec: float = Field(default=1.0, gt=0, le=50)
     concurrency: int = Field(default=4, ge=1, le=16)  # parallel page fetches for sites without a JSON feed (rate limit still applies)
     max_site_minutes: float = Field(default=45.0, gt=0)  # per-site time budget; partial results are kept and flagged
+    feed_rate_per_sec: float = Field(default=5.0, gt=0, le=20)  # Shopify/WooCommerce JSON feeds are built for bulk reading: faster than page crawling
+    feed_workers: int = Field(default=3, ge=1, le=6)  # feed pages fetched at the same time
+    proxy_url: str | None = None  # optional http(s)://user:pass@host:port, used ONLY to retry requests the site blocked (set SCRAPER_PROXY_URL)
     timeout_seconds: float = Field(default=20.0, gt=0)
     max_retries: int = Field(default=3, ge=1, le=10)
     respect_robots: bool = True

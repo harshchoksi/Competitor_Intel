@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 # unit -> (dimension, factor to base unit). Base units: gram, millilitre, piece.
 _UNITS: dict[str, tuple[str, float]] = {
@@ -53,8 +54,12 @@ def _fmt(n: float) -> str:
     return f"{n:g}" if n < 1000 else f"{n:,.0f}"
 
 
+@lru_cache(maxsize=200_000)
 def parse_quantity(title: str) -> Quantity | None:
-    """Best pack size found in a title, or None. When several sizes appear (e.g. '6 x 330ml 1.98L') the multipack total wins."""
+    """Pack size found in a title, or None.
+
+    Multipacks matter: "Coors Light 12oz, 24ct" is 24 x 12oz, NOT 12oz. Reading only the "12oz" made a 24-pack look like a single can,
+    which produced absurd price gaps (+2000%). When a unit size and a pack count are both present they are multiplied."""
     if not title:
         return None
     text = title.replace("\u00a0", " ")
@@ -65,19 +70,29 @@ def parse_quantity(title: str) -> Quantity | None:
         if q is not None and (best is None or q.base > best.base):
             best = q
 
-    for m in _MULTI.finditer(text):
+    for m in _MULTI.finditer(text):  # "2 x 500g", "6x330ml": already a total
         n, each, unit = int(_num(m.group(1))), _num(m.group(2)), re.sub(r"[\s.]", "", m.group(3).lower())
-        q = _build(each * n, unit, text, f"{n} x {_fmt(each)} {m.group(3).strip()}")
-        consider(q)
-    if best is None:
-        for m in _SINGLE.finditer(text):
-            value, unit = _num(m.group(1)), re.sub(r"[\s.]", "", m.group(2).lower())
-            consider(_build(value, unit, text, f"{_fmt(value)} {m.group(2).strip()}"))
-    if best is None:
-        m = _PACK_OF.search(text)
-        if m:
-            best = Quantity("count", float(m.group(1)), f"pack of {m.group(1)}")
-    return best
+        consider(_build(each * n, unit, text, f"{n} x {_fmt(each)} {m.group(3).strip()}"))
+    if best is not None:
+        return best
+    measures: list[Quantity] = []
+    counts: list[Quantity] = []
+    for m in _SINGLE.finditer(text):
+        value, unit = _num(m.group(1)), re.sub(r"[\s.]", "", m.group(2).lower())
+        q = _build(value, unit, text, f"{_fmt(value)} {m.group(2).strip()}")
+        if q is not None:
+            (counts if q.dim == "count" else measures).append(q)
+    m = _PACK_OF.search(text)
+    if m and int(m.group(1)) > 0:
+        counts.append(Quantity("count", float(m.group(1)), f"pack of {m.group(1)}"))
+    if not counts and re.search(r"\bdozen\b", text, re.I):
+        counts.append(Quantity("count", 12.0, "dozen"))
+    unit_size = max(measures, key=lambda q: q.base) if measures else None
+    pack = max(counts, key=lambda q: q.base) if counts else None
+    if unit_size and pack and pack.base > 1:  # 12oz x 24 cans
+        n = pack.base
+        return Quantity(unit_size.dim, unit_size.base * n, f"{n:g} x {unit_size.label}", unit_size.oz * n if unit_size.oz else None)
+    return unit_size or pack
 
 
 def _build(value: float, unit: str, text: str, label: str) -> Quantity | None:
@@ -125,3 +140,12 @@ def strip_quantities(title: str) -> str:
     t = _SINGLE.sub(" ", t)
     t = _PACK_OF.sub(" ", t)
     return re.sub(r"\s+", " ", t).strip()
+
+
+def unit_price(price: float | None, q: Quantity | None) -> tuple[float, str] | None:
+    """Price per 100 g / 100 ml / piece, so different pack sizes can be judged side by side."""
+    if not price or q is None or q.base <= 0:
+        return None
+    if q.dim == "count":
+        return price / q.base, "piece"
+    return price / q.base * 100, "100 g" if q.dim == "mass" else "100 ml"

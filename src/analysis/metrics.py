@@ -10,6 +10,7 @@ from src.ads.links import ad_library_links
 from src.analysis.matching import Match, match_by_category, match_profiles
 from src.analysis.money import fmt
 from src.analysis.pricing import PricingOptions, build_pricing
+from src.analysis.promotions import build_promotions
 from src.analysis.semantic import Embedder, build_profiles, load_embedder
 from src.analysis.types import SiteData
 from src.scrapers.base import ProductRecord
@@ -390,6 +391,7 @@ def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_al
     failed = [c for c in comps if c.status != "ok"]
     result["rows"] = rows
     result["competitors"] = list(per_comp.values())
+    result["promotions"] = build_promotions(sites, source.key, result["currency"])
     result["alerts"] = build_alerts(source, ok_comps, rows, undercut_alert_pct, result["currency"])
     result["insights"] = build_insights(stats, per_comp, rows, source, failed) + signal_insights(sites) + social_insights(sites)
     if result["currency_mismatch"]:
@@ -415,6 +417,8 @@ def analyze(sites: list[SiteData], *, match_threshold: float = 0.85, undercut_al
     result["review_matches"].sort(key=lambda r: -r["confidence"])
     del result["review_matches"][300:]  # the dashboard shows the best few; keep the stored result small
     result["recommendations"] = build_recommendations(result["alerts"], rows, stats, per_comp, source, comps, len(result["review_matches"]), undercut_alert_pct)
+    result["insights"] += result["promotions"]["insights"][:3]  # headline promotion findings also appear among the key insights
+    result["recommendations"] += result["promotions"]["recommendations"]
     result["recommendations"] += signal_recommendations(sites)
     result["recommendations"].sort(key=lambda r: {"high": 0, "medium": 1, "low": 2}[r["priority"]])
     return result

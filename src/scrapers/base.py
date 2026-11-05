@@ -96,6 +96,22 @@ class BaseScraper(ABC):
             except Exception:  # noqa: S110 - progress display must never break scraping
                 pass
 
+    def feed_rate(self) -> float:
+        return max(self.cfg.scraping.rate_limit_per_sec, self.cfg.scraping.feed_rate_per_sec)
+
+    def paged(self, fetch):
+        """Yield (page_number, fetch(page_number)) in order, fetching a few pages ahead in parallel. The consumer stops reading at the last
+        page; at most a few extra (empty) pages are requested."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = self.cfg.scraping.feed_workers
+        page = 1
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while True:
+                wave = list(range(page, page + workers))
+                yield from zip(wave, pool.map(fetch, wave), strict=True)
+                page += workers
+
     def out_of_time(self) -> bool:
         if time.monotonic() > self._deadline:
             msg = f"stopped after the {self.cfg.scraping.max_site_minutes:g}-minute time budget; the list may be incomplete"

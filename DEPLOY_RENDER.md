@@ -43,3 +43,15 @@ Plan guidance: **Starter (512 MB)** handles small catalogues; for ~8,000 product
 
 ## If a competitor is always slow
 Check its card in "Data quality": a note saying the fast feed was unreachable means the site is refusing this server. Options: run again later, lower *Requests / second*, or use *Max products*/*product types* to read only what you need.
+
+## When a competitor site cannot be read
+Each failed site now says WHY, in plain words, in its progress line and in "Data quality". What the app tries, in order:
+1. **The address is the company's main site, not its shop** (e.g. `lingandsons.com` vs `shop.lingandsons.com`): it follows "Shop / Order online" links on the homepage, then tries `shop.`, `store.`, `order.` sub-domains, and reads the store it finds. The result says "read the online store at ...".
+2. **No sitemap**: it follows the site's category pages (and their "page 2, 3..." links) to find product pages.
+3. **Blocked (HTTP 403 / bot check) from this server**: if you set `SCRAPER_PROXY_URL`, ONLY the blocked requests are retried through that proxy. Without it the site is reported as blocked, with the advice to run the tool from your own computer or through a proxy.
+4. **Built with JavaScript, or robots.txt forbids it**: reported clearly. Browser support is optional (`requirements-browser.txt`, needs >= 1 GB RAM). A site's robots.txt is always respected.
+
+A proxy is a paid third-party service (residential/rotating proxies, or a "web unlocker" API that exposes a proxy address). It can route around blocks that some sites put up on purpose; check the site's terms before using one. For sites you are allowed to read, entering the shop address directly is usually enough.
+
+## Why a run takes the time it takes
+Open **Data quality > Where the time went** after a run: it lists reading/saving the sites, matching and pricing (including the AI check of borderline matches), history, and the AI summary. Typical levers: product feeds are read 3 pages at a time at up to 5 requests/second (page-by-page crawling stays at your 2/s setting); matching 8,000 products takes about 1.5 s.

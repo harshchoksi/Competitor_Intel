@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 
 from src.analysis.matching import Match
 from src.analysis.money import fmt
-from src.analysis.quantity import parse_quantity
+from src.analysis.quantity import parse_quantity, unit_price
 from src.analysis.taxonomy import infer_product_type
 from src.analysis.types import SiteData
 from src.scrapers.base import ProductRecord
@@ -29,6 +29,7 @@ class PricingOptions:
     max_increase_pct: float = 5.0
     undercut_pct: float = 1.0
     exclude_out_of_stock: bool = True
+    max_price_ratio: float = 3.0  # a competitor price more than this many times above/below yours is treated as a different product / pack size
 
 
 def _round_price(x: float, reference: float) -> float:
@@ -55,11 +56,13 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
                 by_source[m.source_idx].append((c, m))
 
     items: list[dict] = []
+    suspect_list: list[dict] = []
     for si, pairs in by_source.items():
         sp: ProductRecord = source.products[si]
         if not sp.price:
             continue
         s_qty = parse_quantity(sp.title)
+        price = sp.price
         entries: list[dict] = []
         for c, m in pairs:
             cp = c.products[m.comp_idx]
@@ -67,7 +70,9 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
                 continue
             adjusted = cp.price * m.size_ratio if m.size_relation == "scalable" and m.size_ratio else cp.price
             c_qty = parse_quantity(cp.title)
+            c_unit = unit_price(cp.price, c_qty)
             entries.append({
+                "compare_at": cp.compare_at_price, "unit_price": round(c_unit[0], 3) if c_unit else None, "unit_label": c_unit[1] if c_unit else None,
                 "competitor_key": c.key, "competitor_name": c.name, "title": cp.title, "url": cp.url, "image": cp.image_url,
                 "price": round(cp.price, 2), "adjusted_price": round(adjusted, 2), "size_adjusted": adjusted != cp.price,
                 "size": c_qty.label if c_qty else None, "in_stock": cp.in_stock, "low_stock": cp.low_stock,
@@ -76,8 +81,24 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
             })
         if not entries:
             continue
-        in_stock = [e for e in entries if e["in_stock"] is not False]
-        used = in_stock if (opt.exclude_out_of_stock and in_stock) else entries
+        # Safety net: a competitor price several times above/below yours is almost never the same product (different pack size, missing
+        # size in the title, a bundle...). Keep it OUT of the average and report it instead of recommending a 2,000% price cut.
+        suspects = []
+        for e in entries:
+            hi_p, lo_p = max(price, e["adjusted_price"]), min(price, e["adjusted_price"])
+            e["ratio"] = round(hi_p / lo_p, 1) if lo_p else None
+            e["ignored"] = bool(lo_p and hi_p / lo_p > opt.max_price_ratio)
+            if e["ignored"]:
+                suspects.append(e)
+        entries_ok = [e for e in entries if not e["ignored"]]
+        for e in suspects:
+            suspect_list.append({"title": sp.title, "price": round(price, 2), "size": s_qty.label if s_qty else None, "url": sp.url, "competitor_name": e["competitor_name"],
+                                 "comp_title": e["title"], "comp_price": e["price"], "comp_adjusted": e["adjusted_price"], "comp_size": e["size"], "comp_url": e["url"],
+                                 "ratio": e["ratio"], "confidence": e["confidence"]})
+        if not entries_ok:
+            continue
+        in_stock = [e for e in entries_ok if e["in_stock"] is not False]
+        used = in_stock if (opt.exclude_out_of_stock and in_stock) else entries_ok
         prices = [e["adjusted_price"] for e in used]
         avg, med, lo, hi = statistics.fmean(prices), statistics.median(prices), min(prices), max(prices)
         price = sp.price
@@ -96,7 +117,7 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
 
         n = len(used)
         spread = hi / lo if lo else None
-        min_conf = min(e["confidence"] for e in entries)
+        min_conf = min(e["confidence"] for e in entries_ok)
         flags: list[str] = []
         if n == 1:
             flags.append("Only one competitor sells this, so the average is that single price")
@@ -104,8 +125,10 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
             flags.append("Competitor prices vary a lot (highest is 1.5x the lowest). Check the matches")
         if any(e["size_adjusted"] for e in used):
             flags.append("Competitor pack sizes differ from yours, so their prices were scaled to your size")
-        if len(used) < len(entries):
-            flags.append(f"{len(entries) - len(used)} out-of-stock competitor price(s) ignored")
+        if len(used) < len(entries_ok):
+            flags.append(f"{len(entries_ok) - len(used)} out-of-stock competitor price(s) ignored")
+        if suspects:
+            flags.append(f"{len(suspects)} competitor match(es) ignored: price more than {opt.max_price_ratio:g}x different from yours (probably a different pack size or product)")
         if sp.in_stock is False:
             flags.append("You are out of stock on this product")
         if min_conf < 0.88:
@@ -124,23 +147,28 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
             "id": f"p{si}", "ext_id": sp.external_id, "title": sp.title, "brand": sp.brand, "sku": sp.sku, "url": sp.url, "image": sp.image_url,
             "category": infer_product_type(sp), "size": s_qty.label if s_qty else None, "in_stock": sp.in_stock,
             "price": round(price, 2), "compare_at": sp.compare_at_price,
-            "competitors": sorted(entries, key=lambda e: e["adjusted_price"]), "n_competitors": n, "n_matches": len(entries),
+            "competitors": sorted(entries, key=lambda e: (e["ignored"], e["adjusted_price"])), "n_competitors": n, "n_matches": len(entries_ok), "n_ignored": len(suspects),
+            "low_stock": sp.low_stock, "discount_pct": round((sp.compare_at_price - sp.price) / sp.compare_at_price * 100, 1) if sp.compare_at_price and sp.compare_at_price > sp.price else None,
+            "unit_price": round(s_unit[0], 3) if (s_unit := unit_price(price, s_qty)) else None, "unit_label": s_unit[1] if s_unit else None,
             "market_avg": round(avg, 2), "market_median": round(med, 2), "market_min": round(lo, 2), "market_max": round(hi, 2),
             "gap_abs": round(gap_abs, 2), "gap_pct": round(gap_pct, 1), "position": position,
             "action": action, "suggested_price": suggested, "change_abs": round(change_abs, 2), "change_pct": round(change_pct, 1),
-            "rationale": why, "flags": flags, "confidence": _confidence_label(n, min_conf, spread), "match_confidence": round(statistics.fmean(e["confidence"] for e in entries), 3),
+            "rationale": why, "flags": flags, "confidence": _confidence_label(n, min_conf, spread), "match_confidence": round(statistics.fmean(e["confidence"] for e in entries_ok), 3),
             "min_match_confidence": min_conf, "rank": 1 + sum(1 for p in ranked_prices if p < price), "cheapest": price <= lo,
             "currency": currency,
         })
     items.sort(key=lambda it: -it["gap_pct"])
-    return {"settings": asdict(opt), "currency": currency, "summary": _summary(items, source, comps, matches, currency),
-            "categories": _categories(items, opt), "items": items}
+    summary = _summary(items, source, comps, matches, currency)
+    summary["suspect_matches"] = len(suspect_list)
+    summary["suspect_products"] = len({x["title"] for x in suspect_list})
+    suspect_list.sort(key=lambda x: -(x["ratio"] or 0))
+    return {"settings": asdict(opt), "currency": currency, "summary": summary, "categories": _categories(items, opt), "items": items, "suspect": suspect_list[:300]}
 
 
 def _summary(items: list[dict], source: SiteData, comps: list[SiteData], matches: dict[str, list[Match]], currency: str) -> dict:
     above = [i for i in items if i["position"] == "above"]
     below = [i for i in items if i["position"] == "below"]
-    all_matches = [e for i in items for e in i["competitors"]]
+    all_matches = [e for i in items for e in i["competitors"] if not e.get("ignored")]
     pending = sum(1 for c in comps for m in matches.get(c.key, []) if m.status == "review")
     return {
         "currency": currency, "source_products": len(source.products), "competitor_products": {c.key: len(c.products) for c in comps},

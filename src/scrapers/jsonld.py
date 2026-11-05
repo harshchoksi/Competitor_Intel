@@ -1,6 +1,7 @@
 """Generic fallback: sitemap discovery + schema.org Product (JSON-LD / microdata) via extruct."""
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
@@ -11,8 +12,12 @@ from loguru import logger
 from lxml import etree
 
 from src.scrapers.base import BaseScraper, ProductRecord, ScrapeError, parse_price, valid_compare_at
+from src.scrapers.heuristics import embedded_json_products, html_heuristic_product
 
-DEFAULT_SITEMAPS = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml", "/product-sitemap.xml"]
+DEFAULT_SITEMAPS = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml", "/product-sitemap.xml", "/sitemap-index.xml", "/sitemap_products_1.xml", "/sitemap-products.xml",
+                    "/product-sitemap1.xml", "/xmlsitemap.php", "/1_index_sitemap.xml", "/media/sitemap.xml", "/pub/sitemap.xml"]
+LISTING_HINTS = ("/category/", "/categories/", "/collections/", "/collection/", "/product-category/", "/shop", "/store", "/catalog", "/department", "/aisle", "/c/", "/browse")
+MAX_LISTING_PAGES = 30
 PRODUCT_HINTS = ("/product/", "/products/", "/p/", "/item/", "/shop/", "/buy/", "/dp/")
 EXCLUDE_HINTS = ("/category/", "/collections/", "/tag/", "/blog", "/cart", "/account", "/cdn-cgi/")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".pdf", ".gz")
@@ -156,7 +161,13 @@ def extract_products_from_html(html: str, url: str, default_currency: str) -> li
         if r.external_id not in seen:
             seen.add(r.external_id)
             unique.append(r)
-    return unique or _og_products(html, url, default_currency)
+    if unique:
+        return unique
+    og = _og_products(html, url, default_currency)
+    if og:
+        return og
+    guess = html_heuristic_product(html, url, default_currency)  # last resort: a visible price + "Add to cart" on a plain page
+    return [guess] if guess else []
 
 
 def _og_products(html: str, url: str, currency: str) -> list[ProductRecord]:
@@ -253,7 +264,8 @@ class JsonLdScraper(BaseScraper):
     method = "jsonld"
 
     def discover_urls(self) -> list[str]:
-        roots = self.client.site_maps(self.origin) or [urljoin(self.origin, p) for p in DEFAULT_SITEMAPS]
+        declared = self.client.site_maps(self.origin)
+        roots = list(dict.fromkeys([*declared, *(urljoin(self.origin, p) for p in DEFAULT_SITEMAPS)]))  # robots.txt lists first, then the usual places
         queue, visited = list(roots), set()
         product_urls: list[str] = []
         other_urls: list[str] = []
@@ -285,7 +297,54 @@ class JsonLdScraper(BaseScraper):
         urls = product_urls or other_urls
         if not urls:
             urls = self._homepage_links()
+        if not urls:
+            urls = self._crawl_listings()
         return list(dict.fromkeys(urls))
+
+    @staticmethod
+    def _page_links(html: str, base: str, host: str) -> tuple[list[str], list[str]]:
+        """-> (links that look like products, links that look like category/listing pages), same site only."""
+        soup = BeautifulSoup(html, "lxml")
+        products: list[str] = []
+        listings: list[str] = []
+        for a in soup.find_all("a", href=True):
+            full = urljoin(base, a["href"]).split("#")[0]
+            low = full.lower().split("?")[0]
+            if urlparse(full).netloc != host or low.endswith(IMAGE_EXT) or any(x in low for x in ("/cart", "/account", "/login", "/blog", "/cdn-cgi/", "/checkout")):
+                continue
+            in_card = any(re.search(r"product|item|card|grid-item|tile", " ".join(par.get("class", [])) + " " + str(par.get("id") or ""), re.I) for par in list(a.parents)[:4])
+            if looks_like_product_url(full) or (in_card and not any(h in low for h in LISTING_HINTS)):
+                products.append(full)
+            elif any(h in low for h in LISTING_HINTS) or "page=" in full:
+                listings.append(full)
+        return products, listings
+
+    def _crawl_listings(self) -> list[str]:
+        """No sitemap and no product links on the homepage: follow the category pages (and their pagination) to find product pages."""
+        home = self.fetch_page(self.origin)
+        if home is None:
+            return []
+        host = urlparse(self.origin).netloc
+        found, queue = [], []
+        prods, lists = self._page_links(home[0], self.origin + "/", host)
+        found += prods
+        queue += list(dict.fromkeys(lists))[:12]
+        seen, fetched = set(queue), 0
+        while queue and fetched < MAX_LISTING_PAGES and len(found) < self.max_products * 2 and not self.out_of_time():
+            url = queue.pop(0)
+            page = self.fetch_page(url)
+            fetched += 1
+            if page is None:
+                continue
+            prods, lists = self._page_links(page[0], url, host)
+            found += prods
+            for link in lists:
+                if link not in seen and len(seen) < 80 and ("page=" in link or "/page/" in link or fetched < 8):
+                    seen.add(link)
+                    queue.append(link)
+        if found:
+            logger.info("{}: no sitemap; found {} product links by following {} category pages", self.site.name, len(set(found)), fetched)
+        return found
 
     def fetch_page(self, url: str) -> tuple[str, str] | None:
         """Return (html, final_url). Overridden by the browser scraper to render JavaScript."""
@@ -310,9 +369,31 @@ class JsonLdScraper(BaseScraper):
     def _workers(self) -> int:
         return self.max_workers_override or self.cfg.scraping.concurrency
 
+    def _embedded_products(self) -> list[ProductRecord]:
+        """JavaScript apps (Next.js, Nuxt...) often include their product data as JSON inside the page. Look at the homepage and a few
+        category pages before concluding that a browser is needed."""
+        found: dict[str, ProductRecord] = {}
+        home = self.fetch_page(self.origin)
+        pages = [home] if home else []
+        if home:
+            _, listings = self._page_links(home[0], self.origin + "/", urlparse(self.origin).netloc)
+            for u in list(dict.fromkeys(listings))[:6]:
+                pg = self.fetch_page(u)
+                if pg:
+                    pages.append(pg)
+        for html, url in pages:
+            for rec in embedded_json_products(html, url, self.currency):
+                found.setdefault(rec.external_id, rec)
+        return [r for r in found.values() if self.wants(r)][: self.max_products]
+
     def scrape(self) -> list[ProductRecord]:
         urls = self.discover_urls()
         if not urls:
+            embedded = self._embedded_products()
+            if embedded:
+                self.warnings.append("products were read from data embedded in the page (no sitemap or product pages to follow); the list may be incomplete")
+                logger.info("{}: {} products read from embedded page data", self.site.name, len(embedded))
+                return embedded
             raise ScrapeError("no product URLs found (no usable sitemap or product links)")
         logger.info("{}: {} candidate product pages", self.site.name, len(urls))
         products: list[ProductRecord] = []
@@ -344,6 +425,6 @@ class JsonLdScraper(BaseScraper):
                     else:
                         misses += 1
                         if not products and misses >= GIVE_UP_AFTER:
-                            raise ScrapeError(f"no schema.org Product data on the first {misses} product pages")
+                            raise ScrapeError(f"product-style pages were found but none carried readable price data (checked {misses}: no schema.org markup, Open Graph price or visible price with an add-to-cart button)")
                 self.report(len(products))
         return products[: self.max_products]

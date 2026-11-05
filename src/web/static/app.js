@@ -152,6 +152,7 @@ function renderResults(r) {
 
   const tabs = [
     ["pricing", "Pricing recommendations", () => pricingTab(r)],
+    ["promotions", "Competitor promotions", () => promotionsTab(r)],
     ["insights", "Insights & alerts", () => insightsTab(r)],
     ["competitors", "Competitors", () => competitorsTab(r, comps, colorOf)],
     ["history", "History & offers", () => historyTab(r, colorOf)],
@@ -215,8 +216,12 @@ function historyTab(r, colorOf) {
 
 function qualityTab(r) {
   const box = h("div");
+  const sus = typeof suspectCard === "function" ? suspectCard(r) : null;
+  if (sus) box.append(sus);
   if ((r.review_matches || []).length) box.append(reviewCard(r));
   box.append(dataQuality(r));
+  const tm = typeof timingsCard === "function" ? timingsCard(r) : null;
+  if (tm) box.append(tm);
   return box;
 }
 
@@ -422,14 +427,28 @@ async function loadMonitors() {
 }
 
 // ---------- boot ----------
+function timeAgo(iso) {
+  const d = new Date(iso + (/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? "" : "Z")), sec = Math.max(0, (Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return "just now";
+  if (sec < 3600) return Math.floor(sec / 60) + " min ago";
+  if (sec < 86400) return Math.floor(sec / 3600) + " h ago";
+  return Math.floor(sec / 86400) + " day" + (sec >= 172800 ? "s" : "") + " ago";
+}
 async function loadRecent() {
   try {
     const items = await (await fetch("/api/analyses")).json();
     const box = $("#recent"); box.innerHTML = "";
     if (!items.length) return;
-    box.append("Recent: ");
-    items.slice(0, 5).forEach(i => box.append(h("a", { href: "#a=" + i.id, onclick: () => setTimeout(() => startWatching(i.id), 0) },
-      i.source_url.replace(/^https?:\/\//, "") + " (" + i.status + ")")));
+    const STATE = { done: "Completed", failed: "Failed", running: "Running", queued: "Queued" };
+    box.append(h("div", { class: "recent-head" }, "Recent analyses"),
+      h("div", { class: "recent-grid" }, items.slice(0, 6).map(i => {
+        const host = i.source_url.replace(/^https?:\/\/(www\.)?/, "").replace(/\/.*$/, "");
+        return h("a", { class: "rcard " + i.status, href: "#a=" + i.id, title: `${host}: ${STATE[i.status] || i.status}`, "aria-label": `${host}, ${STATE[i.status] || i.status}, ${timeAgo(i.created_at)}`,
+          onclick: () => setTimeout(() => startWatching(i.id), 0) },
+          h("span", { class: "rdot", "aria-hidden": "true" }),
+          h("span", { class: "rbody" }, h("b", { class: "rtitle" }, host),
+            h("span", { class: "rmeta" }, `vs ${i.competitor_count} competitor${i.competitor_count === 1 ? "" : "s"} · ${timeAgo(i.created_at)}`)));
+      })));
   } catch { /* non-critical */ }
 }
 (async function boot() {

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from loguru import logger
@@ -21,12 +22,39 @@ same product still counts as the same product. Different flavours, cuts (breast 
 Answer ONLY with JSON: {"verdicts":[{"id":<number>,"same":true|false}]} and include every id you were given."""
 
 
-def make_verifier(client: GeminiClient, *, max_pairs: int = 120, batch: int = 20, max_seconds: float = 60.0):
+def make_verifier(client: GeminiClient, *, max_pairs: int = 80, batch: int = 20, max_seconds: float = 30.0, workers: int = 3):
     """-> function(matches, source, competitor) -> matches, suitable for analyze(verifier=...).
 
-    The AI check is a bonus, never a reason for an analysis to hang: it stops for good after the first failure (rate limit,
-    network, bad key) and after `max_seconds` in total across all competitors."""
+    The AI check is a bonus, never a reason for an analysis to hang or crawl: batches run `workers` at a time, it stops for good after the
+    first failure (rate limit, network, bad key) and after `max_seconds` in total across all competitors."""
     state = {"started": None, "disabled": False}
+
+    def over_budget() -> bool:
+        if state["disabled"]:
+            return True
+        if time.monotonic() - state["started"] > max_seconds:
+            logger.warning("AI match check stopped: time budget of {:.0f}s used", max_seconds)
+            state["disabled"] = True
+        return state["disabled"]
+
+    def ask(chunk: list[Match], source: SiteData, comp: SiteData) -> dict[tuple[int, int], bool]:
+        if over_budget():
+            return {}
+        payload = [{"id": n, "a": _desc(source, m.source_idx), "b": _desc(comp, m.comp_idx)} for n, m in enumerate(chunk)]
+        try:
+            out = client.generate_json(SYSTEM, "PAIRS:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        except LLMError as exc:
+            logger.warning("AI match check stopped: {}", exc)
+            state["disabled"] = True
+            return {}
+        found: dict[tuple[int, int], bool] = {}
+        for v in out.get("verdicts") or []:
+            try:
+                m = chunk[int(v["id"])]
+                found[(m.source_idx, m.comp_idx)] = bool(v["same"])
+            except (KeyError, ValueError, IndexError, TypeError):
+                continue
+        return found
 
     def verify(matches: list[Match], source: SiteData, comp: SiteData) -> list[Match]:
         if state["started"] is None:
@@ -34,25 +62,15 @@ def make_verifier(client: GeminiClient, *, max_pairs: int = 120, batch: int = 20
         if state["disabled"]:
             return matches
         pending = sorted((m for m in matches if m.status == "review"), key=lambda m: -m.confidence)[:max_pairs]
+        chunks = [pending[i:i + batch] for i in range(0, len(pending), batch)]
         verdicts: dict[tuple[int, int], bool] = {}
-        for start in range(0, len(pending), batch):
-            if time.monotonic() - state["started"] > max_seconds:
-                logger.warning("AI match check stopped: time budget of {:.0f}s used", max_seconds)
-                state["disabled"] = True
-                break
-            chunk = pending[start:start + batch]
-            payload = [{"id": n, "a": _desc(source, m.source_idx), "b": _desc(comp, m.comp_idx)} for n, m in enumerate(chunk)]
-            try:
-                out = client.generate_json(SYSTEM, "PAIRS:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-            except LLMError as exc:
-                logger.warning("AI match check stopped: {}", exc)
-                state["disabled"] = True
-                break
-            for v in out.get("verdicts") or []:
-                try:
-                    verdicts[(chunk[int(v["id"])].source_idx, chunk[int(v["id"])].comp_idx)] = bool(v["same"])
-                except (KeyError, ValueError, IndexError, TypeError):
-                    continue
+        if len(chunks) <= 1:
+            for c in chunks:
+                verdicts.update(ask(c, source, comp))
+        else:
+            with ThreadPoolExecutor(max_workers=min(workers, len(chunks))) as pool:
+                for found in pool.map(lambda c: ask(c, source, comp), chunks):
+                    verdicts.update(found)
         result: list[Match] = []
         for m in matches:
             verdict = verdicts.get((m.source_idx, m.comp_idx))

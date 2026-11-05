@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from loguru import logger
 from sqlalchemy import Engine, select, text
@@ -18,6 +19,8 @@ from src.db.session import PG_WRITE_LOCK, session_scope
 from src.scrapers.base import BaseScraper, ProductRecord, ScrapeError
 from src.scrapers.browser import BrowserScraper, browser_enabled
 from src.scrapers.detector import DetectionResult, Platform, detect_platform
+from src.scrapers.diagnose import explain_no_products, explain_unreachable
+from src.scrapers.discovery import find_store_candidates, guess_store_origins
 from src.scrapers.http import PoliteClient
 from src.scrapers.jsonld import JsonLdScraper
 from src.scrapers.shopify import ShopifyScraper
@@ -40,6 +43,8 @@ class SiteResult:
     social: dict | None = None
     warnings: list[str] = field(default_factory=list)
     currency: str | None = None  # detected from the homepage; product records may carry their own
+    resolved_url: str | None = None  # the online store we actually read when the address given was only the company's main website
+    hint: str | None = None  # plain-language reason + advice when the site could not be read
 
 
 def build_chain(detection: DetectionResult, settings: ScrapingSettings | None = None) -> list[type[BaseScraper]]:
@@ -61,9 +66,40 @@ def scrape_site(site: SiteConfig, is_source: bool, cfg: AppConfig, client: Polit
                 on_count: Callable[[int], None] | None = None) -> SiteResult:
     """Products via the scraper chain, then (best effort) offers/policies/social/marketing signals."""
     result = _scrape_products(site, is_source, cfg, client, on_count)
+    host = urlparse(site.origin).netloc
+    if not result.reachable and client.failures.get(host, "").startswith("robots-unreachable"):
+        # robots.txt could not be downloaded (busy server / rate limit). That is not a ban: pause, forget the verdict and try once more.
+        logger.info("{}: robots.txt was unreachable, trying once more after a pause", site.name)
+        client.pause(8)
+        client.forget_robots(site.origin)
+        result = _scrape_products(site, is_source, cfg, client, on_count)
+    if result.status != "ok" and result.reachable:
+        result = _discover_store(site, is_source, cfg, client, on_count, result)
     if result.reachable:
-        result.signals = collect_site_signals(client, site.origin)
+        result.signals = collect_site_signals(client, urlparse(result.resolved_url).scheme + "://" + urlparse(result.resolved_url).netloc if result.resolved_url else site.origin)
     return result
+
+
+def _discover_store(site: SiteConfig, is_source: bool, cfg: AppConfig, client: PoliteClient, on_count, first: SiteResult) -> SiteResult:
+    """The address works but has no products: it is probably the company's main website. Look for its online store (a 'Shop' link on the
+    homepage, or shop./store./order. sub-domains) and read that instead."""
+    home = client.get(site.origin)
+    html = home.text if home is not None else ""
+    linked = find_store_candidates(html, site.origin)
+    candidates = linked or guess_store_origins(urlparse(site.origin).netloc, limit=3)
+    tried: list[str] = []
+    for cand in candidates[:4]:
+        tried.append(urlparse(cand).netloc)
+        logger.info("{}: no products here, looking for the store at {}", site.name, cand)
+        res = _scrape_products(site.model_copy(update={"url": cand}), is_source, cfg, client, on_count)
+        if res.status == "ok":
+            res.site, res.resolved_url = site, cand
+            res.warnings.insert(0, f"no products at {site.url}; read the online store at {cand} instead")
+            logger.info("{}: found the store at {} ({} products)", site.name, cand, len(res.products))
+            return res
+    first.hint = explain_no_products(html, tried, linked, first.error or "")
+    first.error = f"{first.hint} (technical details: {first.error})"
+    return first
 
 
 def _scrape_products(site: SiteConfig, is_source: bool, cfg: AppConfig, client: PoliteClient,
@@ -74,7 +110,10 @@ def _scrape_products(site: SiteConfig, is_source: bool, cfg: AppConfig, client: 
         detection = detect_platform(client, site.url)
         result.platform = detection.platform.value
         if not detection.reachable:
-            result.error, result.reachable = "; ".join(detection.evidence), False
+            technical = "; ".join(detection.evidence)
+            result.reachable = False
+            result.hint = explain_unreachable(technical, client.failures.get(urlparse(site.origin).netloc), client.proxy_configured)
+            result.error = f"{result.hint} (technical details: {technical})"
             return result
         result.currency = detection.currency
         logger.info("{}: detected {} ({})", site.name, detection.platform.value, "; ".join(detection.evidence))
@@ -156,6 +195,8 @@ def persist_result(session: Session, run_id: int, res: SiteResult) -> None:
     for o in (res.signals or {}).get("offers", []):
         session.add(Offer(site_id=site.id, run_id=run_id, type=_cl(Offer, "type", o["type"]), text=o["text"], code=_cl(Offer, "code", o.get("code")),
                           discount_value=o.get("discount_value"), detected_at=now))
+    for banner in (res.signals or {}).get("announcements", []):  # full banner/hero/pop-up messages; used to see how long a campaign has run
+        session.add(Offer(site_id=site.id, run_id=run_id, type="banner", text=banner, code=None, discount_value=None, detected_at=now))
     if res.status != "ok":
         return
     # one row per product id (a scraper can return the same id twice; the database allows one price snapshot per product per run)

@@ -6,6 +6,7 @@ ingredient they contain (orange, tomato, milk). Falls back to the shop's own cat
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from src.scrapers.base import ProductRecord
 
@@ -24,13 +25,13 @@ _RULES: list[tuple[str, str]] = [
     ("Breakfast & Cereal", r"cereal|cheerios|oats|oatmeal|muesli|cornflakes|corn flakes|pancake|waffle|porridge"),
     # ---- sauces, oils, condiments (before tomato/chilli/etc.)
     ("Sauces, Oils & Condiments", r"sauce|ketchup|catsup|mayo|mayonnaise|mustard|dressing|vinegar|\boil\b|\bghee\b|marinade|salsa|pickle|relish|chutney|hummus|dip\b|syrup|\bjam\b|jelly|honey|spread"),
-    ("Bakery", r"\bbread\b|\bloaf\b|\bbun\b|\bbuns\b|bagel|croissant|muffin|\bcake\b|donut|doughnut|tortilla|\bpita\b|naan|roti|pastry|brioche|baguette|\brolls?\b"),
+    ("Bakery", r"\bbakery\b|\bbread\b|\bloaf\b|\bbun\b|\bbuns\b|bagel|croissant|muffin|\bcake\b|donut|doughnut|tortilla|\bpita\b|naan|roti|pastry|brioche|baguette|\brolls?\b"),
     ("Baking & Sweeteners", r"\bsugar\b|sweetener|splenda|stevia|\bflour\b|baking|yeast|custard|food colou?r|vanilla extract"),
     ("Pantry & Staples", r"\brice\b|pasta|spaghetti|macaroni|noodle|lentil|\bdal\b|beans?\b|chickpea|\bsoup\b|\bstock\b|bouillon|spice|masala|seasoning|\bsalt\b|pepper powder|couscous|quinoa|\bsemolina\b|tuna can|instant|ramen|mac & cheese|mac and cheese"),
     # ---- fresh categories
     ("Seafood", r"\bfish\b|salmon|\btuna\b|shrimp|prawn|\bcrab\b|lobster|\bcod\b|tilapia|sardine|squid|calamari|mackerel|snapper|mahi|grouper|haddock|\bhake\b|anchov|oyster|mussel|clam|seafood|fillet of fish|barramundi|\bbasa\b|pomfret|surmai"),
     ("Meat & Poultry", r"chicken|\bbeef\b|\bpork\b|\blamb\b|mutton|turkey|steak|sausage|bacon|\bham\b|salami|\bmince\b|minced|ground meat|ground beef|\bribs?\b|brisket|veal|\bgoat\b|\bduck\b|hot dog|frankfurter|drumstick|\bwings?\b|patty|patties|\bmeat\b|sirloin|ribeye|tenderloin|pepperoni|bratwurst|kebab|keema|cutlet|nugget|jerky|\bbone\b"),
-    ("Dairy & Eggs", r"\bmilk\b|cheese|yogh?urt|\bbutter\b|\bcream\b|\beggs?\b|cheddar|mozzarella|parmesan|margarine|paneer|\bcurd\b|kefir|\bdahi\b|whipping|half & half|half and half|cottage|ricotta|feta|gouda|brie|lassi"),
+    ("Dairy & Eggs", r"\bdairy\b|\bmilk\b|cheese|yogh?urt|\bbutter\b|\bcream\b|\beggs?\b|cheddar|mozzarella|parmesan|margarine|paneer|\bcurd\b|kefir|\bdahi\b|whipping|half & half|half and half|cottage|ricotta|feta|gouda|brie|lassi"),
     ("Fruits & Vegetables", r"apple|banana|orange|lemon|\blime\b|onion|potato|tomato|carrot|lettuce|cabbage|spinach|broccoli|cucumber|capsicum|bell pepper|garlic|ginger|mango|grape|avocado|berry|berries|strawberr|pineapple|vegetable|fruit|salad|mushroom|pumpkin|zucchini|courgette|eggplant|aubergine|cauliflower|celery|coriander|cilantro|parsley|mint|melon|papaya|guava|pomegranate|kiwi|peach|plum|pear|cherry|cherries|coconut|corn on|sweet potato|beetroot|radish|okra|peas\b|herbs?\b|\blemon bag"),
     ("Frozen Foods", r"\bfrozen\b|\bfrz\b"),
     # ---- non-food
@@ -96,11 +97,17 @@ def categorize_text(title: str, category: str | None = None, tags: list[str] | N
 
 
 def infer_product_type(p: ProductRecord) -> str:
-    """Product type for grouping: our taxonomy first, then the shop's own leaf category, then 'Other'."""
-    hit = categorize_text(p.title or "", p.category, p.tags)
+    """Product type for grouping: our taxonomy first, then the shop's own leaf category, then 'Other'. Memoised: matching, pricing and
+    promotions all ask about the same products."""
+    return _product_type(p.title or "", p.category, tuple(p.tags or ()))
+
+
+@lru_cache(maxsize=200_000)
+def _product_type(title: str, category: str | None, tags: tuple) -> str:
+    hit = categorize_text(title, category, list(tags))
     if hit:
         return hit
-    raw = (p.category or "").strip()
+    raw = (category or "").strip()
     if raw:
         leaf = [x.strip() for x in re.split(r"[>|/\\]", raw) if x.strip()]
         if leaf and leaf[-1].lower() not in {"other", "misc", "product", "products", "all", "sale", "new", "uncategorized", "uncategorised"} and len(leaf[-1]) > 2:

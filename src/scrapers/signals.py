@@ -133,6 +133,40 @@ def extract_offers(soup: BeautifulSoup) -> list[dict]:
     return offers
 
 
+ANN_ATTR = re.compile(r"announce|promo|banner|offer|topbar|top-bar|marquee|ticker|notice|strip|hero|slide|carousel|popup|pop-up|modal|countdown|deal|sale|campaign|billboard|splash|headline", re.I)
+ANN_SKIP = re.compile(r"product|price|badge|footer|cart|review|rating|breadcrumb|filter|menu|nav-|swatch|variant|card", re.I)
+ANN_HINT = re.compile(r"\d{1,2}\s*%|%\s*off|\boff\b|discount|\bsale\b|\bdeals?\b|offers?\b|save\s|free\s+(?:shipping|delivery|gift)|buy\s*\d+\s*(?:,\s*)?get|\bbogo\b|coupon|promo|cash\s?back|clearance|"
+                      r"flash|festive|black\s+friday|use\s+code|special\s+price|\bfrom\s+\d{1,2}\s*(?:st|nd|rd|th)?\s*[a-z]{3}|\b(?:till|until|ends)\b", re.I)
+
+
+def extract_announcements(soup: BeautifulSoup) -> list[str]:
+    """Full (untruncated) text of announcement bars, hero banners, pop-ups and marquee tickers that look like promotions.
+    These carry the details we need for campaigns: amount, product type, dates and codes."""
+    cands = [*soup.find_all(class_=ANN_ATTR), *soup.find_all(id=ANN_ATTR), *soup.find_all(["marquee"]), *soup.find_all(attrs={"role": "alert"}),
+             *soup.find_all(["h1", "h2", "h3"])]
+    texts: list[str] = []
+    for el in cands:
+        attrs = " ".join([" ".join(el.get("class", []) if isinstance(el.get("class"), list) else [str(el.get("class") or "")]), str(el.get("id") or "")])
+        if el.name not in ("h1", "h2", "h3") and ANN_SKIP.search(attrs):
+            continue
+        t = re.sub(r"\s+", " ", el.get_text(" ", strip=True))
+        if 8 <= len(t) <= 320 and ANN_HINT.search(t):
+            texts.append(t)
+    meta = soup.find("meta", attrs={"property": "og:description"}) or soup.find("meta", attrs={"name": "description"})
+    if meta and meta.get("content") and ANN_HINT.search(meta["content"]):
+        texts.append(re.sub(r"\s+", " ", meta["content"].strip())[:320])
+    out: list[str] = []
+    norm: list[str] = []
+    for t in sorted(texts, key=len, reverse=True):  # longest first, so a fragment of a longer message is dropped
+        n = re.sub(r"\W+", " ", t.lower()).strip()
+        if n and not any(n in o for o in norm):
+            norm.append(n)
+            out.append(t)
+        if len(out) >= 15:
+            break
+    return out
+
+
 def parse_shipping(text: str) -> tuple[int | None, bool]:
     if FREE_SHIP_ALL.search(text):
         return 0, True
@@ -178,7 +212,7 @@ def extract_signals(html: str, base_url: str) -> dict:
     text = soup.get_text(" ", strip=True)
     threshold, free_all = parse_shipping(text)
     low = text.lower()
-    return {"offers": extract_offers(soup), "free_shipping_threshold": threshold, "free_shipping_all": free_all,
+    return {"offers": extract_offers(soup), "announcements": extract_announcements(soup), "free_shipping_threshold": threshold, "free_shipping_all": free_all,
             "payment_methods": [k for k, rx in PAYMENTS.items() if re.search(rx, low)], "social_links": social,
             "marketing_stack": stack, "policy_links": links[:4], "_text": text}
 

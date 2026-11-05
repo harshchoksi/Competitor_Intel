@@ -63,7 +63,7 @@ def test_jsonld_gives_up_quickly_when_pages_have_no_structured_data(make_client,
         JsonLdScraper(client, cfg.competitors[1], cfg).scrape()
         raise AssertionError("expected ScrapeError")
     except Exception as exc:
-        assert "no schema.org Product data" in str(exc)
+        assert "readable price data" in str(exc)
     assert sum(1 for r in client.transport.calls if r.url.path.startswith("/product/")) == 10  # did not hammer all 30
 
 

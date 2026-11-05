@@ -40,6 +40,44 @@ Matching is one-to-one per competitor. The **match threshold** slider (default 8
 - **Max products per site** is optional: leave it empty for everything. **Only these product types / keywords** limits the run to e.g. `meat, chicken`.
 - Live progress shows how many products have been found per site. Big catalogues take a while: a generic site needs one request per product page, so 5,000 products at 2 requests/second is about 40 minutes (Shopify/WooCommerce sites are far faster).
 
+## Competitor promotions (discount amount, product type, period)
+The **Competitor promotions** tab answers: how much do competitors discount, on what, and for how long. Everything is read from the competitors' own websites:
+- **Discount amount and product type**: every product with a crossed-out "was" price. Shown as average / maximum % off, share of the catalogue on sale, and a product-type matrix (you vs each competitor, with the gap in percentage points). Competitors that do not publish "was" prices are listed as "not measurable".
+- **Campaigns**: homepage banners, announcement bars, hero text and pop-ups are split into separate offers and parsed into amount (% / flat / buy-one-get-one / free shipping), what it applies to (a product type or everything), conditions (first order, min spend...), coupon code and **period** (stated start/end dates, "today only", "this weekend", "ends Sunday"). Days left are calculated for you.
+- **Observed duration**: each analysis stores what it saw, so from the second run onward the tab shows how long today's discounts have actually been in place (a lower bound: the sale may have started before our first look). Run it again later, or use a monitor, to build this up.
+- **Export**: promotions CSV; a "Competitor promotions" section is also added to the PDF.
+- **What is NOT included**: Instagram/Facebook/TikTok posts and paid ads (planned as the next phase). Banners loaded only by JavaScript cannot be read. Dates written as images or without a day/month are not understood; numeric dates are read day/month.
+
+## Price sanity checks
+- **Multipacks** are read as unit size x count ("12oz, 24ct" is 24 x 12 oz, not 12 oz). A 24-pack is never compared with a single can; a 12-pack versus a 24-pack is compared per unit.
+- **Implausible gaps are kept out.** If a competitor's price (scaled to your pack size) is more than 3x above or below yours, that match is ignored in the averages and listed under Data quality > "Matches ignored because prices were far apart", so one bad match can't produce a +2000% recommendation. Change the limit with the `max_price_ratio` field.
+- Each product card shows your product (price, was-price, stock, unit price) beside every matched competitor product (price, was-price, stock, size, match %, link).
+
+## Alerts: email and Telegram (the "Monitor this comparison" box)
+A monitor re-runs your comparison on a schedule and sends a digest when something changed (price drops, new offers, new products, undercuts). It only runs **while the website is running**, and **no message is sent if nothing changed** (the first run has nothing to compare with, so don't expect an email from it).
+
+**Email (needs an SMTP account).** Put these in `.env` (on your PC) or in Render's *Environment* tab (on Render; `.env` is not deployed):
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com
+SMTP_PASSWORD=your-16-letter-app-password
+SMTP_FROM=you@gmail.com
+APP_BASE_URL=https://your-app.onrender.com     # makes the "Full report" link in the email work
+```
+- **Gmail:** a normal password does not work. Turn on 2-Step Verification, then create an *App password* (Google Account > Security > App passwords) and paste the 16 letters (no spaces) as `SMTP_PASSWORD`. Port 587 uses STARTTLS; port 465 uses SSL; both are supported.
+- Other providers work the same way (host, port, login). Use a transactional-email service (Brevo, Mailgun, SendGrid...) if you want to send from your own domain; check their current free limits.
+- Restart the app after changing `.env`.
+
+**Telegram.** In Telegram open **@BotFather**, send `/newbot`, follow the steps and copy the token into `TELEGRAM_BOT_TOKEN`. Then open a chat with your new bot and press **Start**. Your chat id is the number shown by **@userinfobot**, or open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` after messaging the bot and read `"chat":{"id": ...}`. Type that number in the "Telegram chat id" box. Keep the token private.
+
+**Test before relying on it:**
+```bash
+python scripts/test_alerts.py --email you@example.com
+python scripts/test_alerts.py --telegram 123456789
+```
+It prints which settings it sees and, if sending fails, a plain-language hint (wrong app password, wrong host/port...).
+
 ## Hosting (Render etc.)
 See **DEPLOY_RENDER.md** for why a hosted run can be much slower than on your computer, the database errors seen on hosts, the settings to use, and `render.yaml`.
 
@@ -82,7 +120,7 @@ Without keys everything else still works; the AI card is simply hidden and rule-
 
 ## Tests
 ```bash
-python -m pytest -q          # 186 tests, no network needed
+python -m pytest -q          # 255 tests, no network needed
 ruff check .
 # UI end-to-end (needs Node and `npm i jsdom`): start `python -m src.web --demo`, then `node scripts/ui_smoke.js`
 ```

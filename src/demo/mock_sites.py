@@ -109,10 +109,29 @@ def items(port: int):
         sku = f"G-{i + 1:04d}" if port == 8101 else (f"{port % 100}{i + 1:05d}" if port in (8102, 8103) else f"X{i + 1:04d}")
         yield {
             "i": i, "sku": sku, "brand": brand, "cat": cat, "price": price,
-            "list": round(price * (1.2 + 0.05 * (port % 4))) if (i + port) % 7 == 0 else None,
+            "list": _was(port, i, cat, price),
             "stock": (i + port) % 9 != 4, "low": (i * port) % 17 == 3,
             "title": _title(port, name, brand, v, u),
         }
+
+
+# port -> {category: (% of that category's products on sale, discount depth %)}; 8106 deliberately shows no original prices
+SALES = {
+    8101: {"Meat": (10, 8), "Dairy": (30, 6), "Drinks": (10, 5)},
+    8102: {"Meat": (75, 22), "Seafood": (40, 15), "Dairy": (20, 10)},
+    8103: {"Dairy": (65, 18), "Drinks": (50, 12), "Produce": (20, 8)},
+    8104: {"Meat": (30, 12), "Dairy": (30, 14), "Drinks": (30, 12), "Pantry": (30, 13), "Snacks": (30, 15), "Seafood": (30, 12), "Produce": (30, 10)},
+    8105: {"Snacks": (85, 25), "Pantry": (40, 10)},
+    8106: {},
+}
+
+
+def _was(port: int, i: int, cat: str, price: int) -> int | None:
+    share, depth = SALES.get(port, {}).get(cat, (0, 0))
+    if share and (i * 13 + port * 7) % 100 < share:
+        d = depth + ((i * 3) % 7) - 3  # a little spread around the store's typical depth
+        return round(price / (1 - max(d, 3) / 100))
+    return None
 
 
 SHIP_THRESHOLD = {8101: 999, 8102: 499, 8103: 799, 8104: 1499, 8105: 599, 8106: 899}
@@ -122,15 +141,31 @@ SCRIPTS = {"fb": '<script src="https://connect.facebook.net/en_US/fbevents.js"><
            "tiktok": '<script src="https://analytics.tiktok.com/i18n/pixel/events.js"></script>'}
 
 
+def _d(days: int) -> str:
+    import datetime as _dt
+
+    d = _dt.date.today() + _dt.timedelta(days=days)
+    return f"{d.day} {d.strftime('%b')}"
+
+
+BANNERS = {
+    8101: lambda: f"Flat 12% OFF on dairy. Use code SAVE12 | Valid till {_d(10)}",
+    8102: lambda: f"MEAT FESTIVAL: Flat 22% off all meat & poultry! Valid from {_d(-3)} to {_d(9)}. Use code MEAT22",
+    8103: lambda: f"Dairy Week: up to 18% off all dairy products, ends {_d(4)}",
+    8104: lambda: f"Buy 1 Get 1 free on selected drinks this weekend | Extra 10% off sitewide with code FRESH10, ends {_d(14)}",
+    8105: lambda: f"Snack Attack: 25% OFF all snacks and sweets, {_d(1)} to {_d(6)}",
+    8106: lambda: "Welcome offer: get 10% off your first order. Use code WELCOME10",
+}
+
+
 def home_html(port: int) -> str:
     e = STATE["epoch"]
     kind = KIND[port]
     marker = {"shopify": '<script src="https://cdn.shopify.com/s/x.js"></script>', "woo": "", "custom": ""}[kind]
     body_cls = ' class="woocommerce"' if kind == "woo" else ""
-    pct = 10 + port % 10
-    banner = f"Flat {pct}% OFF on groceries. Use code SAVE{pct} at checkout"
+    banner = BANNERS[port]()
     if e and port != 8101:
-        banner += f" | Flash sale: extra 5% off with code FLASH{e}"
+        banner += f" | Flash sale: extra 5% off with code FLASH{e}, today only!"
     return (f"<html><head>{marker}{''.join(SCRIPTS[x] for x in PIXELS[port])}</head><body{body_cls}>"
             f'<div class="announcement-bar">{banner}</div><div class="topbar">Free shipping on orders above ₹{SHIP_THRESHOLD[port]}</div>'
             f"<h1>Store {port}</h1><p>Pay with UPI, cards, EMI or Cash on Delivery.</p>"

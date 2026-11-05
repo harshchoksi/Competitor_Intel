@@ -15,6 +15,7 @@ from sqlalchemy import Engine, select
 from src.analysis.history import attach_history
 from src.analysis.metrics import analyze
 from src.analysis.pricing import PricingOptions
+from src.analysis.promotions import attach_promo_history
 from src.analysis.types import SiteData
 from src.config import AppConfig, ScrapingSettings
 from src.db.models import Analysis, Site, SocialSnapshot, utcnow
@@ -74,7 +75,7 @@ def build_config(source_url: str, competitor_urls: list[str], options: dict, cac
         "categories_to_track": options.get("categories", []),
         **({"currency": options["currency"]} if options.get("currency") else {}),
         "scraping": {"rate_limit_per_sec": options.get("rate_limit_per_sec", 2.0), "cache_ttl_minutes": 10, "cache_dir": cache_dir,
-                     "max_site_minutes": site_time_budget_minutes()},
+                     "max_site_minutes": site_time_budget_minutes(), "proxy_url": os.environ.get("SCRAPER_PROXY_URL", "").strip() or None},
     })
 
 
@@ -82,7 +83,8 @@ def pricing_options_from(options: dict) -> PricingOptions:
     d = PricingOptions()
     return PricingOptions(
         tolerance_pct=float(options.get("tolerance_pct", d.tolerance_pct)), max_increase_pct=float(options.get("max_increase_pct", d.max_increase_pct)),
-        undercut_pct=float(options.get("undercut_pct", d.undercut_pct)), exclude_out_of_stock=bool(options.get("exclude_out_of_stock", d.exclude_out_of_stock)))
+        undercut_pct=float(options.get("undercut_pct", d.undercut_pct)), exclude_out_of_stock=bool(options.get("exclude_out_of_stock", d.exclude_out_of_stock)),
+        max_price_ratio=float(options.get("max_price_ratio", d.max_price_ratio)))
 
 
 def recover_interrupted_analyses(engine: Engine) -> int:
@@ -176,8 +178,18 @@ def execute_analysis(analysis_id: str, engine: Engine, client_factory: ClientFac
                 snapshot = {"stage": progress["stage"], "sites": {k: dict(v) for k, v in progress["sites"].items()}}
             _update(engine, analysis_id, progress=snapshot)
 
+        timings: dict[str, float] = {}
+        t_mark = time.monotonic()
+
+        def lap(name: str) -> None:
+            nonlocal t_mark
+            now = time.monotonic()
+            timings[name] = round(now - t_mark, 1)
+            t_mark = now
+
         with client_factory(cfg.scraping) as client:
             run_id, results = run_scrape(cfg, engine, client, progress=on_progress, parallel=len(cfg.all_sites()))
+        lap("Reading and saving the websites")
 
         yt = (youtube_factory or youtube_from_env)()
         try:
@@ -187,6 +199,7 @@ def execute_analysis(analysis_id: str, engine: Engine, client_factory: ClientFac
             if yt is not None:
                 yt.close()
 
+        lap("Social media data")
         progress["stage"] = "analyzing"
         _update(engine, analysis_id, run_id=run_id, progress={"stage": "analyzing", "sites": progress["sites"]})
         sites = [_to_site_data(r) for r in results]
@@ -204,15 +217,22 @@ def execute_analysis(analysis_id: str, engine: Engine, client_factory: ClientFac
                 llm.close()
             raise
 
+        lap("Matching products and working out prices" + (" (incl. AI check of borderline matches)" if llm is not None else ""))
         if result["comparison_available"]:
             try:
                 attach_history(engine, result, run_id, cfg.product_cap, options.get("undercut_alert_pct", 5.0))
+                try:  # how long have today's discounts been running? A failure here must never lose the analysis
+                    attach_promo_history(engine, result["promotions"], sites, run_id)
+                except Exception:
+                    logger.exception("promotion history failed")
             except Exception:
                 logger.exception("history analysis failed for {}", analysis_id)
                 result["changes"] = {"has_history": False, "sites": {}}
+            lap("History and discount tracking")
             progress["stage"] = "writing"
             _update(engine, analysis_id, progress={"stage": "writing", "sites": progress["sites"]})
             result["ai"] = generate_ai_insights(result, llm, use_ai=use_ai)
+            lap("AI summary")
         if llm is not None:
             llm.close()
 
@@ -223,6 +243,9 @@ def execute_analysis(analysis_id: str, engine: Engine, client_factory: ClientFac
                 logger.exception("notification step failed for {}", analysis_id)
                 result["notifications"] = [{"channel": "all", "status": "failed", "error": "unexpected error"}]
 
+        timings["Total"] = round(sum(timings.values()), 1)
+        result["timings"] = timings
+        logger.info("analysis {} finished in {}s: {}", analysis_id, timings["Total"], "; ".join(f"{k} {v}s" for k, v in timings.items() if k != "Total"))
         source_ok = sites[0].status == "ok"
         if not source_ok:
             error = f"Could not read your own website ({sites[0].name}): {sites[0].error or 'unknown error'}"

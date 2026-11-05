@@ -25,7 +25,7 @@ def _snap(s, site_id: int, run_id: int) -> dict[str, dict]:
 
 
 def _offers(s, site_id: int, run_id: int) -> dict[str, str]:
-    return {_norm(t): t for (t,) in s.execute(select(Offer.text).where(Offer.site_id == site_id, Offer.run_id == run_id)) if t}
+    return {_norm(t): t for (t,) in s.execute(select(Offer.text).where(Offer.site_id == site_id, Offer.run_id == run_id, Offer.type != "banner")) if t}
 
 
 def compute_changes(engine: Engine, run_id: int, keys: list[str], cap: int) -> dict:

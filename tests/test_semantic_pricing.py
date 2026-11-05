@@ -156,11 +156,11 @@ def test_pricing_scales_competitor_price_to_your_pack_size():
 def test_pricing_ignores_out_of_stock_competitor_prices():
     me = site("me", [P("Chicken Breast 500g", price=100)], source=True)
     a = site("a", [P("Chicken Breast 500g", price=100)])
-    b = site("b", [P("Chicken Breast 500g", price=10, stock=False)])
+    b = site("b", [P("Chicken Breast 500g", price=70, stock=False)])
     it = analyze([me, a, b])["pricing"]["items"][0]
     assert it["market_avg"] == 100 and it["n_competitors"] == 1 and any("out-of-stock" in f for f in it["flags"])
     it2 = analyze([me, a, b], pricing_options=PricingOptions(exclude_out_of_stock=False))["pricing"]["items"][0]
-    assert it2["market_avg"] == 55
+    assert it2["market_avg"] == 85
 
 
 def test_currency_is_detected_and_used_in_messages():
@@ -305,3 +305,43 @@ def test_no_product_limit_is_accepted_by_the_api(client):
     r = client.post("/api/analyses", json={"source_url": "mine.test", "competitor_urls": ["rival.test"], "use_ai": False, "max_products": 0})
     assert r.status_code == 202
     assert client.post("/api/analyses", json={"source_url": "mine.test", "competitor_urls": ["rival.test"], "currency": "dollars"}).status_code == 422
+
+
+# ---------------------------------------------------------------- multipacks and implausible matches
+def test_multipack_is_read_as_unit_size_times_count():
+    q = parse_quantity("Coors Light Beer Can 12oz, 24ct")
+    assert q.label == "24 x 12 oz" and q.base == pytest.approx(24 * 28.3495 * 29.5735 / 28.3495, rel=0.01) or q.base > 8000
+    assert compare_quantities(q, parse_quantity("Coors Light Beer 12oz"))[0] == "incompatible"
+    assert compare_quantities(q, parse_quantity("Coors Light 12oz 24 pack"))[0] == "same"
+    assert compare_quantities(parse_quantity("Fiji Water 1L"), parse_quantity("Fiji Water 1L 12pk"))[0] == "incompatible"
+    assert parse_quantity("Eggs Dozen").base == 12
+
+
+def test_a_24_pack_is_not_matched_to_a_single_can():
+    """The +2442% bug: 24-pack at 88.97 compared with a single can at 3.50."""
+    ms = match_products([P("Coors Light Beer Can 12oz, 24ct", price=88.97)], [P("Coors Light Beer Can 12oz", price=3.5)], 0.80)
+    assert not ms or ms[0].status != "matched"
+    same = match_products([P("Corona Extra Can 12oz, 12ct")], [P("Corona Extra 12oz, 12 pack")], 0.80)
+    assert same and same[0].status == "matched" and same[0].size_relation == "same"
+
+
+def test_implausible_price_gaps_are_kept_out_of_recommendations_and_reported():
+    me = site("me", [P("Basmati Rice Premium", price=100)], source=True)
+    rv = site("rv", [P("Basmati Rice Premium", price=2.0)])  # same title, no sizes: matched, but 50x cheaper is not credible
+    pr = analyze([me, rv])["pricing"]
+    assert pr["items"] == [] and pr["summary"]["suspect_matches"] == 1
+    s = pr["suspect"][0]
+    assert s["price"] == 100 and s["comp_price"] == 2.0 and s["ratio"] == 50.0
+    ok = analyze([me, site("rv2", [P("Basmati Rice Premium", price=60)])], pricing_options=PricingOptions(max_price_ratio=3.0))["pricing"]
+    assert ok["items"] and ok["items"][0]["market_avg"] == 60 and ok["suspect"] == []
+    mixed = analyze([me, site("a", [P("Basmati Rice Premium", price=2.0)]), site("b", [P("Basmati Rice Premium", price=90)])])["pricing"]["items"][0]
+    assert mixed["market_avg"] == 90 and mixed["n_competitors"] == 1 and mixed["n_ignored"] == 1 and any("ignored" in f for f in mixed["flags"])
+
+
+def test_product_and_competitor_details_for_the_card():
+    me = site("me", [P("Chicken Breast 500g", price=120, compare_at_price=150, low_stock=True)], source=True)
+    rv = site("rv", [P("Chicken Breast 0.5 kg", price=100, compare_at_price=125, stock=False)])
+    it = analyze([me, rv], pricing_options=PricingOptions(exclude_out_of_stock=False))["pricing"]["items"][0]
+    assert it["discount_pct"] == 20.0 and it["low_stock"] is True and it["unit_label"] == "100 g" and it["unit_price"] == pytest.approx(24.0)
+    c = it["competitors"][0]
+    assert c["compare_at"] == 125 and c["in_stock"] is False and c["discount_pct"] == 20.0 and c["unit_price"] == pytest.approx(20.0) and c["ignored"] is False

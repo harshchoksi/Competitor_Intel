@@ -127,26 +127,80 @@ async function loadExplorer() {
   } catch (e) { list.style.opacity = 1; list.innerHTML = ""; list.append(h("p", { class: "error" }, "Could not load products.")); }
 }
 
+const stockChip = (inStock, low) => (inStock === false ? h("span", { class: "chip failed" }, "Out of stock")
+  : low ? h("span", { class: "chip warning" }, "Low stock") : inStock === true ? h("span", { class: "chip done" }, "In stock") : h("span", { class: "chip waiting" }, "Stock unknown"));
+const unitText = (v, label) => (v == null ? null : `${money(v)} per ${label}`);
+
 function productCard(it) {
   const confCls = it.confidence === "high" ? "done" : it.confidence === "medium" ? "info" : "warning";
-  const matches = it.competitors.map(e => h("li", {},
-    h("div", { class: "grow" }, safeUrl(e.url) ? h("a", { href: e.url, target: "_blank", rel: "noopener noreferrer" }, e.title) : e.title,
-      h("small", {}, `${e.competitor_name} · match ${Math.round(e.confidence * 100)}%`, e.size_adjusted ? " · scaled to your size" : "", e.in_stock === false ? " · out of stock" : e.low_stock ? " · low stock" : "")),
-    h("span", { class: "num" + (e.in_stock === false ? " oos" : "") }, money(e.adjusted_price), e.size_adjusted ? h("small", {}, `listed ${money(e.price)}`) : null)));
-  return h("article", { class: "pcard" },
-    thumb(it),
-    h("div", { class: "pmain" },
-      h("div", { class: "phead" },
-        h("div", { class: "grow" }, h("h3", {}, safeUrl(it.url) ? h("a", { href: it.url, target: "_blank", rel: "noopener noreferrer" }, it.title) : it.title),
-          h("small", {}, [it.category, it.brand, it.size, it.sku && "SKU " + it.sku].filter(Boolean).join(" · "))),
-        h("div", { class: "yourprice" }, h("b", {}, money(it.price)), h("small", {}, it.in_stock === false ? "Out of stock" : it.in_stock ? "In stock" : ""))),
-      h("details", { class: "matches" }, h("summary", {}, `${it.n_matches} matching product${it.n_matches === 1 ? "" : "s"} at competitors · market average ${money(it.market_avg)} (${money(it.market_min)} – ${money(it.market_max)})`),
-        h("ul", { class: "mlist" }, matches),
-        h("small", { class: "why" }, "Why matched: ", [...new Set(it.competitors.flatMap(e => e.reasons))].slice(0, 5).join("; "))),
-      h("div", { class: "reco " + it.action },
-        h("div", {}, h("span", { class: "chip " + ACTION_CLASS[it.action] }, ACTION_LABEL[it.action]), " ",
-          it.action !== "hold" ? h("b", {}, `${money(it.price)} → ${money(it.suggested_price)} (${pct(it.change_pct)})`) : null,
-          h("span", { class: "chip " + confCls, style: "float:right", title: "Based on number of competitors, match quality and price spread" }, it.confidence + " confidence")),
-        h("p", {}, it.rationale),
-        it.flags.length ? h("ul", { class: "flags" }, it.flags.map(f => h("li", {}, f))) : null)));
+  // ---- your product (left)
+  const you = h("div", { class: "pc-you" },
+    h("div", { class: "pc-label" }, "Your product"),
+    h("div", { class: "pc-head" }, thumb(it),
+      h("div", { class: "grow" }, h("h3", {}, safeUrl(it.url) ? h("a", { href: it.url, target: "_blank", rel: "noopener noreferrer" }, it.title) : it.title),
+        h("div", { class: "pc-meta" }, [it.category, it.brand, it.size, it.sku && "SKU " + it.sku].filter(Boolean).map(x => h("span", { class: "chip waiting" }, x))))),
+    h("div", { class: "pc-price" }, h("b", {}, money(it.price)),
+      it.compare_at && it.compare_at > it.price ? h("s", {}, money(it.compare_at)) : null,
+      it.discount_pct ? h("span", { class: "chip done" }, `${it.discount_pct}% off`) : null),
+    h("div", { class: "pc-facts" }, stockChip(it.in_stock, it.low_stock),
+      unitText(it.unit_price, it.unit_label) ? h("small", {}, unitText(it.unit_price, it.unit_label)) : null,
+      h("small", {}, (() => {
+        const live = it.competitors.filter(e => !e.ignored), cheaper = live.filter(e => e.adjusted_price > it.price).length;
+        return cheaper === live.length ? "Cheapest of all matched products" : cheaper === 0 ? "Most expensive of all matched products" : `Cheaper than ${cheaper} of ${live.length} matched competitors`;
+      })())));
+
+  // ---- competitor products (right): always visible
+  const rows = it.competitors.map(e => {
+    const diff = it.price ? (e.adjusted_price - it.price) / it.price * 100 : null;
+    return h("tr", { class: e.ignored ? "ignored" : "" },
+      h("td", { class: "ct-thumb" }, safeUrl(e.image) ? h("img", { class: "thumb sm", src: e.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" }) : null),
+      h("td", { style: "white-space:normal" }, h("b", {}, e.competitor_name),
+        h("div", { class: "ct-title" }, safeUrl(e.url) ? h("a", { href: e.url, target: "_blank", rel: "noopener noreferrer" }, e.title) : e.title),
+        h("small", {}, [e.size, `match ${Math.round(e.confidence * 100)}%`, e.size_adjusted ? "scaled to your pack size" : null].filter(Boolean).join(" · ")),
+        e.ignored ? h("small", { class: "ignnote" }, `Ignored: ${e.ratio}× different from your price (probably a different pack size or product)`) : null),
+      h("td", { class: "num" }, h("b", {}, money(e.adjusted_price)),
+        e.size_adjusted ? h("small", { style: "display:block" }, `listed ${money(e.price)}`) : null,
+        e.compare_at && e.compare_at > e.price ? h("small", { style: "display:block" }, h("s", {}, money(e.compare_at)), ` ${e.discount_pct}% off`) : null,
+        unitText(e.unit_price, e.unit_label) ? h("small", { style: "display:block" }, unitText(e.unit_price, e.unit_label)) : null),
+      h("td", { class: "num " + (e.ignored || diff == null ? "" : diff < -3 ? "cheap" : diff > 3 ? "dear" : "") }, e.ignored || diff == null ? "–" : pct(diff)),
+      h("td", {}, stockChip(e.in_stock, e.low_stock)));
+  });
+  const comp = h("div", { class: "pc-comp" },
+    h("div", { class: "pc-label" }, `Competitor products (${it.n_matches} matched${it.n_ignored ? `, ${it.n_ignored} ignored` : ""})`),
+    h("div", { class: "tablewrap" }, h("table", { class: "ctable" },
+      h("thead", {}, h("tr", {}, ["", "Competitor product", "Price", "vs you", "Stock"].map((x, i) => h("th", { class: i === 2 || i === 3 ? "num" : "" }, x)))), h("tbody", {}, rows))),
+    h("div", { class: "pc-market" }, h("span", {}, "Market average ", h("b", {}, money(it.market_avg))), h("span", {}, "Lowest ", h("b", {}, money(it.market_min))), h("span", {}, "Highest ", h("b", {}, money(it.market_max))),
+      h("span", { class: it.gap_pct > 0 ? "neg" : it.gap_pct < 0 ? "pos" : "" }, "You are ", h("b", {}, pct(it.gap_pct)), " vs average")),
+    h("small", { class: "why" }, "Why matched: ", [...new Set(it.competitors.filter(e => !e.ignored).flatMap(e => e.reasons))].slice(0, 5).join("; ")));
+
+  const reco = h("div", { class: "reco " + it.action },
+    h("div", {}, h("span", { class: "chip " + ACTION_CLASS[it.action] }, ACTION_LABEL[it.action]), " ",
+      it.action !== "hold" ? h("b", {}, `${money(it.price)} → ${money(it.suggested_price)} (${pct(it.change_pct)})`) : null,
+      h("span", { class: "chip " + confCls, style: "float:right", title: "Based on number of competitors, match quality and price spread" }, it.confidence + " confidence")),
+    h("p", {}, it.rationale),
+    it.flags.length ? h("ul", { class: "flags" }, it.flags.map(f => h("li", {}, f))) : null);
+  return h("article", { class: "pcard2" }, you, comp, reco);
+}
+
+// Matches we refused to use because the prices were implausibly far apart (usually different pack sizes)
+function suspectCard(r) {
+  const list = ((r.pricing || {}).suspect) || [];
+  if (!list.length) return null;
+  const body = h("tbody", {}, list.slice(0, 60).map(x => h("tr", {},
+    h("td", { style: "white-space:normal" }, safeUrl(x.url) ? h("a", { href: x.url, target: "_blank", rel: "noopener noreferrer" }, x.title) : x.title, h("small", { style: "display:block" }, x.size || "size not stated")),
+    h("td", { class: "num" }, money(x.price)),
+    h("td", { style: "white-space:normal" }, h("b", {}, x.competitor_name), h("div", { class: "ct-title" }, safeUrl(x.comp_url) ? h("a", { href: x.comp_url, target: "_blank", rel: "noopener noreferrer" }, x.comp_title) : x.comp_title), h("small", {}, x.comp_size || "size not stated")),
+    h("td", { class: "num" }, money(x.comp_adjusted)), h("td", { class: "num" }, h("span", { class: "chip warning" }, x.ratio + "×")))));
+  return h("div", { class: "card" }, h("h2", {}, `Matches ignored because prices were far apart (${list.length})`),
+    h("p", { class: "note" }, "These looked like the same product by name, but the prices differ by more than 3×, which almost always means a different pack size (single can vs 24-pack) or a different product. They are NOT used in the averages or recommendations. Open the links to check."),
+    h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Your product", "Your price", "Competitor product", "Their price", "Gap"].map((x, i) => h("th", { class: i === 1 || i === 3 || i === 4 ? "num" : "" }, x)))), body)));
+}
+
+// Where the time went (handy when a hosted run feels slow)
+function timingsCard(r) {
+  const t = r.timings;
+  if (!t || !Object.keys(t).length) return null;
+  const rows = Object.entries(t).filter(([k]) => k !== "Total").map(([k, v]) => h("tr", {}, h("td", {}, k), h("td", { class: "num" }, v < 1 ? "< 1 s" : v + " s")));
+  return h("div", { class: "card" }, h("h2", {}, `Where the time went (${t.Total} s in total)`),
+    h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Step"), h("th", { class: "num" }, "Time"))), h("tbody", {}, rows))));
 }

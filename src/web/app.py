@@ -5,6 +5,7 @@ import csv
 import io
 import os
 import re
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Engine, select
+from sqlalchemy.orm import defer
 
 from src.db.models import Analysis, Monitor, utcnow
 from src.db.session import init_db, make_engine, session_scope
@@ -55,6 +57,7 @@ class AnalysisRequest(BaseModel):
     max_increase_pct: float = Field(default=5.0, ge=0, le=50)
     undercut_pct: float = Field(default=1.0, ge=0, le=20)
     exclude_out_of_stock: bool = True
+    max_price_ratio: float = Field(default=3.0, ge=1.5, le=50)  # competitor prices further than this many times from yours are ignored as likely mismatches
 
 
 class MonitorRequest(AnalysisRequest):
@@ -140,7 +143,7 @@ def create_app(
         return source, comps, {
             "max_products": req.max_products or None, "categories": cats, "use_ai": req.use_ai, "match_threshold": req.match_threshold,
             "currency": (req.currency or "").upper() or None, "rate_limit_per_sec": req.rate_limit_per_sec, "tolerance_pct": req.tolerance_pct,
-            "max_increase_pct": req.max_increase_pct, "undercut_pct": req.undercut_pct, "exclude_out_of_stock": req.exclude_out_of_stock}
+            "max_increase_pct": req.max_increase_pct, "undercut_pct": req.undercut_pct, "exclude_out_of_stock": req.exclude_out_of_stock, "max_price_ratio": req.max_price_ratio}
 
     @app.post("/api/analyses", status_code=202)
     def create_analysis_endpoint(req: AnalysisRequest) -> dict:
@@ -203,40 +206,54 @@ def create_app(
         submit(aid)
         return {"analysis_id": aid}
 
+    # The stored result of a big analysis is several MB of JSON. The page asks for it several times at once right after a run finishes
+    # (summary, two top lists, the product explorer): parse it ONCE, share it, and never load it while a run is still in progress.
+    _result_cache: dict[str, tuple[str, dict | None]] = {}
+    _result_lock = threading.Lock()
+
+    def _cached_result(analysis_id: str) -> tuple[str, dict | None]:
+        with _result_lock:
+            with session_scope(engine) as s:
+                row = s.execute(select(Analysis.status, Analysis.finished_at).where(Analysis.id == analysis_id)).first()
+                if row is None:
+                    raise HTTPException(404, "Analysis not found")
+                status, finished = row
+                if status in ("queued", "running"):
+                    return status, None
+                stamp = f"{finished}|{status}"
+                hit = _result_cache.get(analysis_id)
+                if hit and hit[0] == stamp:
+                    return status, hit[1]
+                result = s.scalar(select(Analysis.result).where(Analysis.id == analysis_id))
+            if len(_result_cache) >= 3:
+                _result_cache.pop(next(iter(_result_cache)))
+            _result_cache[analysis_id] = (stamp, result)
+            return status, result
+
     @app.get("/api/analyses/{analysis_id}")
     def get_analysis(analysis_id: str, lite: bool = False) -> dict:
         """lite=1 leaves out the big per-product lists (use /pricing to page through them) so the dashboard loads fast."""
         with session_scope(engine) as s:
-            a = s.get(Analysis, analysis_id)
+            a = s.execute(select(Analysis).options(defer(Analysis.result)).where(Analysis.id == analysis_id)).scalar_one_or_none()
             if a is None:
                 raise HTTPException(404, "Analysis not found")
-            result = a.result
+            base = {"id": a.id, "status": a.status, "error": a.error, "progress": a.progress, "source_url": a.source_url, "competitor_urls": a.competitor_urls,
+                    "options": a.options, "created_at": a.created_at.isoformat(), "finished_at": a.finished_at.isoformat() if a.finished_at else None}
+            running = a.status in ("queued", "running")
+        result = None
+        if not running:
+            _, result = _cached_result(analysis_id)
             if lite and result:
                 result = {k: v for k, v in result.items() if k != "rows"}
                 if result.get("pricing"):
                     result["pricing"] = {k: v for k, v in result["pricing"].items() if k != "items"}
-            return {"id": a.id, "status": a.status, "error": a.error, "progress": a.progress, "result": result,
-                    "source_url": a.source_url, "competitor_urls": a.competitor_urls, "options": a.options,
-                    "created_at": a.created_at.isoformat(), "finished_at": a.finished_at.isoformat() if a.finished_at else None}
-
-    _items_cache: dict[str, tuple[str, list[dict]]] = {}
+        return {**base, "result": result}
 
     def _pricing_items(analysis_id: str) -> tuple[list[dict], dict]:
-        with session_scope(engine) as s:
-            a = s.get(Analysis, analysis_id)
-            if a is None:
-                raise HTTPException(404, "Analysis not found")
-            if a.status in ("queued", "running"):
-                raise HTTPException(409, "The analysis is still running.")
-            stamp = f"{a.finished_at}|{a.status}"
-            cached = _items_cache.get(analysis_id)
-            if cached and cached[0] == stamp:
-                return cached[1], {}
-            items = list(((a.result or {}).get("pricing") or {}).get("items") or [])
-        if len(_items_cache) >= 4:
-            _items_cache.pop(next(iter(_items_cache)))
-        _items_cache[analysis_id] = (stamp, items)
-        return items, {}
+        status, result = _cached_result(analysis_id)
+        if status in ("queued", "running"):
+            raise HTTPException(409, "The analysis is still running.")
+        return list(((result or {}).get("pricing") or {}).get("items") or []), {}
 
     sort_keys = {
         "gap_desc": (lambda i: i["gap_pct"], True), "gap_asc": (lambda i: i["gap_pct"], False),
@@ -311,6 +328,30 @@ def create_app(
         return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="pricing-recommendations-{analysis_id}.csv"'})
 
+    @app.get("/api/analyses/{analysis_id}/promotions.csv")
+    def promotions_csv(analysis_id: str) -> Response:
+        """Campaigns (amount, product type, dates, code) followed by the discount-by-product-type table."""
+        _, result = _cached_result(analysis_id)
+        promos = (result or {}).get("promotions")
+        if not promos:
+            raise HTTPException(409, "No promotion data in this analysis yet.")
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["CAMPAIGNS AND BANNER OFFERS"])
+        w.writerow(["Site", "Offer", "Kind", "Amount", "Unit", "Applies to", "Status", "Start", "End", "Days left", "Code", "Min spend", "Conditions", "First seen by us", "Original text"])
+        for c in promos.get("campaigns", []):
+            w.writerow([c["site_name"], c["summary"], c["kind"], c["amount"] if c["amount"] is not None else "", c["unit"] or "", c["applies_to"] or "", c["status"], c["start"] or "", c["end"] or "",
+                        c["days_left"] if c["days_left"] is not None else "", c["code"] or "", c["min_spend"] or "", "; ".join(c["conditions"]), c.get("first_seen") or "", c["text"]])
+        w.writerow([])
+        w.writerow(["DISCOUNT DEPTH MEASURED FROM PRODUCT PRICES, BY PRODUCT TYPE"])
+        w.writerow(["Site", "Product type", "Products", "On sale", "% on sale", "Avg discount %", "Median discount %", "Max discount %", "Avg saving"])
+        for d in promos.get("sites", {}).values():
+            for t in d["by_type"]:
+                if t["on_sale"]:
+                    w.writerow([d["name"], t["type"], t["products"], t["on_sale"], t["on_sale_pct"], t["avg_discount_pct"], t["median_discount_pct"], t["max_discount_pct"], t["avg_saving"]])
+        return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="competitor-promotions-{analysis_id}.csv"'})
+
     @app.get("/api/analyses/{analysis_id}/report.pdf")
     def download_report(analysis_id: str) -> Response:
         with session_scope(engine) as s:
@@ -339,7 +380,7 @@ def create_app(
     @app.get("/api/analyses")
     def list_analyses() -> list[dict]:
         with session_scope(engine) as s:
-            rows = s.scalars(select(Analysis).order_by(Analysis.created_at.desc()).limit(10)).all()
+            rows = s.scalars(select(Analysis).options(defer(Analysis.result)).order_by(Analysis.created_at.desc()).limit(10)).all()  # titles only: never load the multi-MB results here
             return [{"id": a.id, "status": a.status, "source_url": a.source_url, "competitor_count": len(a.competitor_urls),
                      "created_at": a.created_at.isoformat()} for a in rows]
 

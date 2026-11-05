@@ -10,3 +10,38 @@ Backend changes (your UI files app.js / pricing.js / style.css / index.html are 
   tests/test_deploy_hardening.py   new (22 tests; 2 need TEST_DATABASE_URL)
   Dockerfile, render.yaml (new), DEPLOY_RENDER.md (new), README.md
   setup.sh / run.sh / setup.bat / run.bat   (new) one-command local setup and start
+
+Phase 1 - competitor promotions (this update):
+  src/analysis/promotions.py   NEW  discount depth by product type, banner parsing (amount/scope/dates/code), insights, history tracking
+  src/scrapers/signals.py      banner / hero / pop-up text capture
+  src/scrapers/runner.py       stores banner text per run (for campaign age); fixes a Postgres-only name clash found in testing
+  src/analysis/metrics.py, history.py, taxonomy.py, web/jobs.py, web/app.py (promotions.csv), reporting/pdf_builder.py
+  src/web/static/promotions.js NEW  "Competitor promotions" tab;  app.js (+1 tab line), index.html (+1 script tag), style.css (+4 lines)
+  src/demo/mock_sites.py       demo stores now run dated campaigns and per-type discounts
+  tests/test_promotions.py     NEW  (23 tests);  scripts/ui_smoke.js extended
+
+Update 3 - price accuracy, product cards, scraping fallbacks, speed:
+  src/analysis/quantity.py      multipacks read as unit x count ("12oz, 24ct" = 24 x 12oz); unit price helper
+  src/analysis/pricing.py       implausible matches (> 3x apart) kept out of averages and listed; more fields for the card
+  src/analysis/semantic.py      unknown-size matches weaker; vectorised candidate search (same results, ~3x faster)
+  src/analysis/matching.py, taxonomy.py   memoised category inference (the legacy category comparison was 30% of analysis time)
+  src/scrapers/discovery.py     NEW  finds the real online store (homepage "Shop" links, shop./store./order. sub-domains)
+  src/scrapers/diagnose.py      NEW  plain-language reason + advice for every site that cannot be read
+  src/scrapers/runner.py, http.py, jsonld.py, shopify.py, woocommerce.py, base.py, config.py
+                                store fallback, category-page crawl, optional proxy (SCRAPER_PROXY_URL), parallel feed paging at 5 req/s
+  src/llm/match_verify.py       AI batches in parallel, 30 s budget
+  src/web/jobs.py, app.py       stage timings; one shared parse of the stored result; max_price_ratio option
+  src/web/static/pricing.js     side-by-side product card + "ignored matches" + "where the time went" cards;  app.js (+3 lines), style.css (+appended)
+  tests/test_scrape_robustness.py NEW (14);  tests/test_semantic_pricing.py (+4);  scripts/ui_smoke.js (28 checks)
+  .env.example, render.yaml, DEPLOY_RENDER.md, README.md
+
+Update 4 - quickmart / failing sites / recent cards / alerts:
+  src/scrapers/http.py          robots.txt: 4 tries with back-off, "unreachable" (re-checked after 30 s) is no longer treated as "forbidden"; last error per host
+  src/scrapers/runner.py        one more attempt after a pause when only robots.txt was unreachable
+  src/scrapers/diagnose.py      accurate messages: forbidden vs could-not-download vs no readable prices
+  src/scrapers/heuristics.py    NEW  reads products from plain HTML prices and from JSON embedded by JavaScript frameworks
+  src/scrapers/jsonld.py        uses the two fallbacks
+  src/web/app.py                recent-analyses list no longer loads the multi-MB results
+  src/web/static/app.js, style.css   recent analyses as status cards (no "(done)" text)
+  scripts/test_alerts.py        NEW  test email / Telegram settings;  README.md: Alerts setup guide
+  tests/test_scrape_robustness.py (+8), scripts/ui_smoke.js (31 checks)

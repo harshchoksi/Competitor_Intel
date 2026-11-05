@@ -66,9 +66,13 @@ class ShopifyScraper(BaseScraper):
     def scrape(self) -> list[ProductRecord]:
         products: list[ProductRecord] = []
         seen_ids: set[str] = set()
-        page = 1
-        while len(products) < self.max_products and not self.out_of_time():
-            res = self.client.get(f"{self.origin}/products.json", params={"limit": PAGE_SIZE, "page": page})
+
+        def fetch(page: int):
+            return self.client.get(f"{self.origin}/products.json", params={"limit": PAGE_SIZE, "page": page}, rate=self.feed_rate())
+
+        for page, res in self.paged(fetch):
+            if len(products) >= self.max_products or self.out_of_time():
+                break
             if res is None or not res.ok:
                 if page == 1:
                     why = "unreachable or blocked" if res is None else f"HTTP {res.status_code}"
@@ -95,5 +99,4 @@ class ShopifyScraper(BaseScraper):
             self.report(len(products))
             if len(items) < PAGE_SIZE or new_on_page == 0:  # last page, or the site is repeating itself
                 break
-            page += 1
         return products

@@ -1,6 +1,2 @@
-.env
-data/
-reports/*.pdf
-__pycache__/
-.pytest_cache/
-.ruff_cache/
+# Created by venv; see https://docs.python.org/3/library/venv.html
+*

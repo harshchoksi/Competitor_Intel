@@ -86,6 +86,39 @@ def inr(v) -> str:
     return "–" if v is None else fmt(v, _CURRENCY["v"], 0 if _CURRENCY["v"] == "INR" else None)
 
 
+def _promotions_block(result: dict, S) -> list:
+    """Discount depth by product type and the competitor campaigns found on their websites."""
+    p = result.get("promotions") or {}
+    sites = p.get("sites") or {}
+    if not sites:
+        return []
+    src = p.get("source_key")
+    out: list = [Paragraph("Read from each website: crossed-out original prices on products and banner/announcement text. Social-media posts and ads are not included.", S["caption"]), Spacer(1, 3 * mm)]
+    comp_keys = [k for k in sites if k != src][:5]
+    rows = [r for r in (p.get("types") or []) if r["competitors_on_sale"] > 0][:12]
+    if rows:
+        head = ["Product type", "You", *[sites[k]["name"][:16] for k in comp_keys], "Gap"]
+        data = [[Paragraph(esc(h), S["cellb"]) for h in head]]
+        for r in rows:
+            cells = [Paragraph(esc(r["type"]), S["cell"]), Paragraph(f"{r['yours']:g}%" if r["yours"] is not None else "–", S["cell"])]
+            for k in comp_keys:
+                c = (r["sites"] or {}).get(k)
+                cells.append(Paragraph(f"{c['avg_discount_pct']:g}% ({c['on_sale']})" if c and c["on_sale"] else "–", S["cell"]))
+            cells.append(Paragraph(f"{r['gap_pts']:+.1f} pts" if r["gap_pts"] is not None else "–", S["cell"]))
+            data.append(cells)
+        w = [CONTENT_W * 0.24] + [CONTENT_W * (0.76 / (len(head) - 1))] * (len(head) - 1)
+        out += [Paragraph("Average discount by product type (items on sale in brackets)", S["H2"]), _table(data, w), Spacer(1, 4 * mm)]
+    camps = [c for c in (p.get("campaigns") or []) if not c["is_source"] and c["kind"] != "free_shipping"][:14]
+    if camps:
+        data = [[Paragraph(h, S["cellb"]) for h in ("Competitor", "Offer", "Applies to", "Period", "Code")]]
+        for c in camps:
+            period = (f"{c['start']} to {c['end']}" if c["start"] and c["end"] else f"until {c['end']}" if c["end"] else f"from {c['start']}" if c["start"] else "no dates shown")
+            data.append([Paragraph(esc(c["site_name"][:22]), S["cell"]), Paragraph(esc(c["summary"]), S["cell"]), Paragraph(esc(c["applies_to"] or "not stated"), S["cell"]),
+                         Paragraph(esc(period + f" ({c['status']})"), S["cell"]), Paragraph(esc(c["code"] or "–"), S["cell"])])
+        out += [Paragraph("Competitor campaigns", S["H2"]), _table(data, [CONTENT_W * 0.18, CONTENT_W * 0.26, CONTENT_W * 0.2, CONTENT_W * 0.26, CONTENT_W * 0.10])]
+    return out
+
+
 def _pricing_block(result: dict, S) -> list:
     """Top price cuts and price rises from the per-product recommendations."""
     p = result.get("pricing") or {}
@@ -431,6 +464,11 @@ def build_pdf(result: dict, meta: dict | None = None) -> bytes:
     block = _pricing_block(result, S)
     if block:
         story += [Paragraph(f"{next(counter)}. Pricing recommendations", S["H1"]), *block, PageBreak()]
+
+    # ---- competitor promotions
+    block = _promotions_block(result, S)
+    if block:
+        story += [Paragraph(f"{next(counter)}. Competitor promotions", S["H1"]), *block, PageBreak()]
 
     # ---- price comparison
     story.append(Paragraph(f"{next(counter)}. Price comparison", S["H1"]))
