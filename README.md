@@ -51,6 +51,7 @@ The **Competitor promotions** tab answers: how much do competitors discount, on 
 ## Price sanity checks
 - **Multipacks** are read as unit size x count ("12oz, 24ct" is 24 x 12 oz, not 12 oz). A 24-pack is never compared with a single can; a 12-pack versus a 24-pack is compared per unit.
 - **Implausible gaps are kept out.** If a competitor's price (scaled to your pack size) is more than 3x above or below yours, that match is ignored in the averages and listed under Data quality > "Matches ignored because prices were far apart", so one bad match can't produce a +2000% recommendation. Change the limit with the `max_price_ratio` field.
+- **Pack sizes outside the title.** Many shops put the size on the variant ("PER 500 GR"), in an attribute, or in the description. The scrapers read those (the variant the price comes from first; shipping weight only as a weak last resort), and "per kg" wording counts as a 1 kg pack. If a size is stated on only one site, the match is NOT averaged into a recommendation (it appears under Data quality with the reason); untick "Only compare products whose pack size is known" in Options to include such matches anyway.
 - Each product card shows your product (price, was-price, stock, unit price) beside every matched competitor product (price, was-price, stock, size, match %, link).
 
 ## Alerts: email and Telegram (the "Monitor this comparison" box)
@@ -120,7 +121,7 @@ Without keys everything else still works; the AI card is simply hidden and rule-
 
 ## Tests
 ```bash
-python -m pytest -q          # 255 tests, no network needed
+python -m pytest -q          # 262 tests, no network needed
 ruff check .
 # UI end-to-end (needs Node and `npm i jsdom`): start `python -m src.web --demo`, then `node scripts/ui_smoke.js`
 ```

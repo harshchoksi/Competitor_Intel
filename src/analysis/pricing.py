@@ -17,8 +17,8 @@ from dataclasses import asdict, dataclass
 
 from src.analysis.matching import Match
 from src.analysis.money import fmt
-from src.analysis.quantity import parse_quantity, unit_price
-from src.analysis.taxonomy import infer_product_type
+from src.analysis.quantity import product_quantity, unit_price
+from src.analysis.taxonomy import CATEGORY_GROUP, infer_product_type
 from src.analysis.types import SiteData
 from src.scrapers.base import ProductRecord
 
@@ -30,6 +30,8 @@ class PricingOptions:
     undercut_pct: float = 1.0
     exclude_out_of_stock: bool = True
     max_price_ratio: float = 3.0  # a competitor price more than this many times above/below yours is treated as a different product / pack size
+    require_known_size: bool = True  # food/household: a match whose pack size is stated on only one side cannot be compared per unit, so it is not averaged
+    unknown_size_ratio: float = 1.8  # food/household where NEITHER side states a size: prices this many times apart are probably different pack sizes
 
 
 def _round_price(x: float, reference: float) -> float:
@@ -61,17 +63,22 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
         sp: ProductRecord = source.products[si]
         if not sp.price:
             continue
-        s_qty = parse_quantity(sp.title)
+        s_qty = product_quantity(sp)
         price = sp.price
+        ptype = infer_product_type(sp)
+        # Unrecognised products count as size-sensitive too (a "Mondongo" or "Pepper Jalapeno" is food). Only gadgets/clothing are exempt from the
+        # "neither side states a size" check, because their price does not follow weight or volume.
+        size_sensitive = CATEGORY_GROUP.get(ptype) not in ("Electronics", "Apparel & Sports")
         entries: list[dict] = []
         for c, m in pairs:
             cp = c.products[m.comp_idx]
             if not cp.price:
                 continue
             adjusted = cp.price * m.size_ratio if m.size_relation == "scalable" and m.size_ratio else cp.price
-            c_qty = parse_quantity(cp.title)
+            c_qty = product_quantity(cp)
             c_unit = unit_price(cp.price, c_qty)
             entries.append({
+                "size_state": "one_side" if (s_qty is None) != (c_qty is None) else ("neither" if s_qty is None and c_qty is None else "both"),
                 "compare_at": cp.compare_at_price, "unit_price": round(c_unit[0], 3) if c_unit else None, "unit_label": c_unit[1] if c_unit else None,
                 "competitor_key": c.key, "competitor_name": c.name, "title": cp.title, "url": cp.url, "image": cp.image_url,
                 "price": round(cp.price, 2), "adjusted_price": round(adjusted, 2), "size_adjusted": adjusted != cp.price,
@@ -87,14 +94,21 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
         for e in entries:
             hi_p, lo_p = max(price, e["adjusted_price"]), min(price, e["adjusted_price"])
             e["ratio"] = round(hi_p / lo_p, 1) if lo_p else None
-            e["ignored"] = bool(lo_p and hi_p / lo_p > opt.max_price_ratio)
-            if e["ignored"]:
+            reason = None
+            if lo_p and hi_p / lo_p > opt.max_price_ratio:
+                reason = f"price is {e['ratio']:g}x different from yours (probably a different pack size or product)"
+            elif opt.require_known_size and e["size_state"] == "one_side":  # any product: "5 pack" on one side and nothing on the other
+                reason = "pack size is stated on only one side, so the prices cannot be compared per unit"
+            elif size_sensitive and e["size_state"] == "neither" and lo_p and hi_p / lo_p > opt.unknown_size_ratio:
+                reason = f"neither product states a pack size and the prices are {e['ratio']:g}x apart (probably different pack sizes)"
+            e["ignored"], e["ignored_reason"] = reason is not None, reason
+            if reason:
                 suspects.append(e)
         entries_ok = [e for e in entries if not e["ignored"]]
         for e in suspects:
             suspect_list.append({"title": sp.title, "price": round(price, 2), "size": s_qty.label if s_qty else None, "url": sp.url, "competitor_name": e["competitor_name"],
                                  "comp_title": e["title"], "comp_price": e["price"], "comp_adjusted": e["adjusted_price"], "comp_size": e["size"], "comp_url": e["url"],
-                                 "ratio": e["ratio"], "confidence": e["confidence"]})
+                                 "ratio": e["ratio"], "confidence": e["confidence"], "reason": e["ignored_reason"]})
         if not entries_ok:
             continue
         in_stock = [e for e in entries_ok if e["in_stock"] is not False]
@@ -128,7 +142,7 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
         if len(used) < len(entries_ok):
             flags.append(f"{len(entries_ok) - len(used)} out-of-stock competitor price(s) ignored")
         if suspects:
-            flags.append(f"{len(suspects)} competitor match(es) ignored: price more than {opt.max_price_ratio:g}x different from yours (probably a different pack size or product)")
+            flags.append(f"{len(suspects)} competitor match(es) not used in the average (pack size could not be verified or prices implausibly far apart). See the greyed rows")
         if sp.in_stock is False:
             flags.append("You are out of stock on this product")
         if min_conf < 0.88:
@@ -145,7 +159,7 @@ def build_pricing(source: SiteData, comps: list[SiteData], matches: dict[str, li
         ranked_prices = sorted(prices)
         items.append({
             "id": f"p{si}", "ext_id": sp.external_id, "title": sp.title, "brand": sp.brand, "sku": sp.sku, "url": sp.url, "image": sp.image_url,
-            "category": infer_product_type(sp), "size": s_qty.label if s_qty else None, "in_stock": sp.in_stock,
+            "category": ptype, "size": s_qty.label if s_qty else None, "in_stock": sp.in_stock,
             "price": round(price, 2), "compare_at": sp.compare_at_price,
             "competitors": sorted(entries, key=lambda e: (e["ignored"], e["adjusted_price"])), "n_competitors": n, "n_matches": len(entries_ok), "n_ignored": len(suspects),
             "low_stock": sp.low_stock, "discount_pct": round((sp.compare_at_price - sp.price) / sp.compare_at_price * 100, 1) if sp.compare_at_price and sp.compare_at_price > sp.price else None,

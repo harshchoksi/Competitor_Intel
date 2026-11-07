@@ -335,7 +335,7 @@ def test_implausible_price_gaps_are_kept_out_of_recommendations_and_reported():
     ok = analyze([me, site("rv2", [P("Basmati Rice Premium", price=60)])], pricing_options=PricingOptions(max_price_ratio=3.0))["pricing"]
     assert ok["items"] and ok["items"][0]["market_avg"] == 60 and ok["suspect"] == []
     mixed = analyze([me, site("a", [P("Basmati Rice Premium", price=2.0)]), site("b", [P("Basmati Rice Premium", price=90)])])["pricing"]["items"][0]
-    assert mixed["market_avg"] == 90 and mixed["n_competitors"] == 1 and mixed["n_ignored"] == 1 and any("ignored" in f for f in mixed["flags"])
+    assert mixed["market_avg"] == 90 and mixed["n_competitors"] == 1 and mixed["n_ignored"] == 1 and any("not used in the average" in f for f in mixed["flags"])
 
 
 def test_product_and_competitor_details_for_the_card():

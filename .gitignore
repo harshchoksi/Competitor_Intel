@@ -1,24 +1,2 @@
-# secrets and local data
-.env
-data/
-reports/*.pdf
-*.db
-*.log
-
-# Python
-__pycache__/
-*.pyc
-.pytest_cache/
-.ruff_cache/
-
-# virtual environments (never commit these)
-.venv/
-venv/
-env/
-
-# editors / OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-node_modules/
+# Created by venv; see https://docs.python.org/3/library/venv.html
+*

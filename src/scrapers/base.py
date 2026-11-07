@@ -45,6 +45,8 @@ class ProductRecord(BaseModel):
     rating: float | None = None
     review_count: int | None = None
     variants: list[VariantRecord] = Field(default_factory=list)
+    size_hint: str | None = None  # pack size stated outside the title, e.g. the Shopify variant "PER 500 GR"
+    weight_grams: float | None = None  # shipping weight; a weak hint for pack size (includes packaging)
     source_method: str = ""
 
 

@@ -115,6 +115,11 @@
             Use Gemini AI to verify borderline matches and write a summary
             <small id="ai-hint"></small>
           </label>
+          <label class="check">
+            <input type="checkbox" id="strict-size" checked aria-label="Only compare products with a known pack size">
+            Only compare products whose pack size is known on both sites (recommended)
+            <small style="display:block;color:var(--muted)">Stops “Tomato 1kg” being compared with a “Tomato” whose size is not stated. Untick to include those matches anyway.</small>
+          </label>
         </details>
 
         <p class="hint">💡 Tip: use each store's homepage — we discover the products ourselves.</p>

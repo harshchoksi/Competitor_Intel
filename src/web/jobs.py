@@ -84,7 +84,7 @@ def pricing_options_from(options: dict) -> PricingOptions:
     return PricingOptions(
         tolerance_pct=float(options.get("tolerance_pct", d.tolerance_pct)), max_increase_pct=float(options.get("max_increase_pct", d.max_increase_pct)),
         undercut_pct=float(options.get("undercut_pct", d.undercut_pct)), exclude_out_of_stock=bool(options.get("exclude_out_of_stock", d.exclude_out_of_stock)),
-        max_price_ratio=float(options.get("max_price_ratio", d.max_price_ratio)))
+        max_price_ratio=float(options.get("max_price_ratio", d.max_price_ratio)), require_known_size=bool(options.get("require_known_size", d.require_known_size)))
 
 
 def recover_interrupted_analyses(engine: Engine) -> int:

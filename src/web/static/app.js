@@ -64,6 +64,7 @@ function formOptions() {
     match_threshold: (parseInt($("#match-threshold").value, 10) || 80) / 100,
     categories: $("#categories").value.split(",").map(s => s.trim()).filter(Boolean),
     use_ai: $("#use-ai").checked,
+    require_known_size: $("#strict-size") ? $("#strict-size").checked : true,
     currency: $("#currency").value.trim().toUpperCase() || null,
     tolerance_pct: num("#tolerance", 3), max_increase_pct: num("#max-increase", 5),
     rate_limit_per_sec: num("#rate-limit", 2),

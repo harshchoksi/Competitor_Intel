@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from loguru import logger
 
+from src.analysis.quantity import pick_size_hint, size_from_description
 from src.scrapers.base import BaseScraper, ProductRecord, ScrapeError, VariantRecord, parse_price, valid_compare_at
 
 PAGE_SIZE = 250
@@ -41,7 +42,15 @@ def parse_shopify_product(item: dict, origin: str, currency: str) -> ProductReco
     handle = item.get("handle")
     barcode = next((v.get("barcode") for v in item.get("variants") or [] if v.get("barcode")), None)
 
+    raw = next((v for v in item.get("variants") or [] if rep is not None and str(v.get("id")) == str(rep.external_id)), None)
+    if raw is None and item.get("variants"):
+        raw = item["variants"][0]
+    raw = raw or {}
+    size_hint = pick_size_hint([raw.get("title"), raw.get("option1"), raw.get("option2"), raw.get("option3")]) or size_from_description(item.get("body_html"))
+    grams = raw.get("grams")
+
     return ProductRecord(
+        size_hint=size_hint, weight_grams=float(grams) if isinstance(grams, (int, float)) and grams > 0 else None,
         external_id=str(item["id"]),
         url=f"{origin}/products/{handle}" if handle else None,
         title=title,

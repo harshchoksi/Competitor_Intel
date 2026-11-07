@@ -31,6 +31,7 @@ _UNIT_ALT = "|".join(sorted((re.escape(u) for u in _UNITS), key=len, reverse=Tru
 # "2 x 500g", "6x330ml", "500 g", "33cl", "8 fl oz", "12 pack", "6 pk"
 _MULTI = re.compile(rf"(?<![\w.]){_NUM}\s*[x×]\s*{_NUM}\s*(fl\.?\s*oz|{_UNIT_ALT})(?![a-z])", re.I)
 _SINGLE = re.compile(rf"(?<![\w.]){_NUM}\s*(fl\.?\s*oz|{_UNIT_ALT})(?![a-z])", re.I)
+_PER_UNIT = re.compile(r"\b(?:per|sold\s+(?:by|per)(?:\s+the)?|price\s+per|/)\s*(kg|kilo|kilogram|kgs|lb|lbs|pound|litre|liter|l|gal|gallon)\b", re.I)
 _PACK_OF = re.compile(r"(?:pack|box|case|set)\s+of\s+(\d+)\b", re.I)
 _LIQUID_HINT = re.compile(r"\b(juice|water|soda|soft drink|drink|milk|oil|vinegar|wine|beer|cider|whisky|whiskey|vodka|rum|gin|liqueur|sauce|syrup|dressing|shampoo|lotion|detergent|cola|tea|coffee|smoothie|cream)\b", re.I)
 
@@ -41,6 +42,7 @@ class Quantity:
     base: float  # grams, millilitres or pieces in the whole pack
     label: str  # as shown to the user, e.g. "500 g"
     oz: float | None = None  # raw ounce count when the title said oz/fl oz (oz is used loosely for both)
+    weak: bool = False  # a guess from shipping weight, not a stated pack size: only trusted when the other side is also a weight
 
     def unit_label(self) -> str:
         return {"mass": "100 g", "volume": "100 ml", "count": "piece"}[self.dim]
@@ -87,6 +89,12 @@ def parse_quantity(title: str) -> Quantity | None:
         counts.append(Quantity("count", float(m.group(1)), f"pack of {m.group(1)}"))
     if not counts and re.search(r"\bdozen\b", text, re.I):
         counts.append(Quantity("count", 12.0, "dozen"))
+    if not measures:
+        m = _PER_UNIT.search(text)
+        if m:  # "PER KG": the price is for one kilo / pound / litre
+            q = _build(1.0, m.group(1).lower(), text, f"1 {m.group(1).lower()}")
+            if q is not None:
+                measures.append(q)
     unit_size = max(measures, key=lambda q: q.base) if measures else None
     pack = max(counts, key=lambda q: q.base) if counts else None
     if unit_size and pack and pack.base > 1:  # 12oz x 24 cans
@@ -113,17 +121,20 @@ def compare_quantities(a: Quantity | None, b: Quantity | None) -> tuple[str, flo
     'incompatible' different dimensions or sizes too far apart to be the same product line"""
     if a is None or b is None:
         return "unknown", None
+    weak = a.weak or b.weak
     if a.dim != b.dim:
+        if weak:
+            return "unknown", None  # a shipping weight says nothing about a litre
         if a.oz and b.oz:  # "8 oz" (mass) vs "8 fl oz" (volume): the same label on the bottle
             ratio = a.oz / b.oz
             return ("same" if abs(ratio - 1) <= 0.03 else "scalable" if 0.2 <= ratio <= 5 else "incompatible"), ratio
         return "incompatible", None
     ratio = a.base / b.base
-    if abs(ratio - 1) <= 0.03:
+    if abs(ratio - 1) <= (0.12 if weak else 0.03):  # shipping weight includes packaging, so allow more slack
         return "same", 1.0
     if 0.2 <= ratio <= 5:
         return "scalable", ratio
-    return "incompatible", ratio
+    return ("unknown", None) if weak else ("incompatible", ratio)
 
 
 def scale_price(comp_price: float, src: Quantity | None, comp: Quantity | None) -> tuple[float, bool]:
@@ -139,6 +150,7 @@ def strip_quantities(title: str) -> str:
     t = _MULTI.sub(" ", title or "")
     t = _SINGLE.sub(" ", t)
     t = _PACK_OF.sub(" ", t)
+    t = _PER_UNIT.sub(" ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -149,3 +161,39 @@ def unit_price(price: float | None, q: Quantity | None) -> tuple[float, str] | N
     if q.dim == "count":
         return price / q.base, "piece"
     return price / q.base * 100, "100 g" if q.dim == "mass" else "100 ml"
+
+
+_DESC_SIZE = re.compile(rf"(?:\bper|net\s*(?:weight|wt\.?|content|contents)|weight|size|sold\s+(?:by|per|in)|pack\s+of|each)\s*[:\-]?\s*(?:the\s+)?({_NUM}\s*(?:fl\.?\s*oz|{_UNIT_ALT}))(?![a-z])", re.I)
+
+
+def pick_size_hint(candidates: list[str | None]) -> str | None:
+    """The first text (variant title, option value...) that really states a pack size."""
+    for c in candidates:
+        if c and c.strip().lower() not in ("default title", "default", "standard", "regular") and parse_quantity(c) is not None:
+            return c.strip()[:80]
+    return None
+
+
+def size_from_description(text: str | None) -> str | None:
+    """A pack size in marketing text, accepted only with a clear cue ("net weight 500g", "sold per 1 kg"): bare numbers like "2g fibre" are not sizes."""
+    if not text:
+        return None
+    m = _DESC_SIZE.search(re.sub(r"<[^>]+>", " ", text)[:400])
+    return m.group(1).strip() if m else None
+
+
+def product_quantity(p) -> Quantity | None:
+    """Pack size of a scraped product. The title first; then the size the shop gives on the variant/attributes; shipping weight only as a
+    last, weaker resort."""
+    q = parse_quantity(p.title)
+    if q is not None:
+        return q
+    hint = getattr(p, "size_hint", None)
+    if hint:
+        q = parse_quantity(hint)
+        if q is not None:
+            return q
+    grams = getattr(p, "weight_grams", None)
+    if grams and 5 <= grams <= 50_000:
+        return Quantity("mass", float(grams), f"{grams:g} g (shipping weight)", weak=True)
+    return None

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from loguru import logger
 
+from src.analysis.quantity import pick_size_hint, size_from_description
 from src.scrapers.base import BaseScraper, ProductRecord, ScrapeError, parse_price, valid_compare_at
 
 PER_PAGE = 100
@@ -34,7 +35,11 @@ def parse_woo_product(item: dict, currency_default: str) -> ProductRecord | None
     brands = item.get("brands") or []
     images = item.get("images") or []
 
+    terms = [t.get("name") for a in (item.get("attributes") or []) for t in (a.get("terms") or []) if isinstance(t, dict)]
+    size_hint = pick_size_hint(terms) or size_from_description(item.get("short_description")) or size_from_description(item.get("description"))
+
     return ProductRecord(
+        size_hint=size_hint,
         external_id=str(item["id"]),
         url=item.get("permalink"),
         title=title,

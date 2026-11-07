@@ -57,6 +57,7 @@ class AnalysisRequest(BaseModel):
     max_increase_pct: float = Field(default=5.0, ge=0, le=50)
     undercut_pct: float = Field(default=1.0, ge=0, le=20)
     exclude_out_of_stock: bool = True
+    require_known_size: bool = True  # only average competitor prices whose pack size is known on both sides (recommended)
     max_price_ratio: float = Field(default=3.0, ge=1.5, le=50)  # competitor prices further than this many times from yours are ignored as likely mismatches
 
 
@@ -143,7 +144,7 @@ def create_app(
         return source, comps, {
             "max_products": req.max_products or None, "categories": cats, "use_ai": req.use_ai, "match_threshold": req.match_threshold,
             "currency": (req.currency or "").upper() or None, "rate_limit_per_sec": req.rate_limit_per_sec, "tolerance_pct": req.tolerance_pct,
-            "max_increase_pct": req.max_increase_pct, "undercut_pct": req.undercut_pct, "exclude_out_of_stock": req.exclude_out_of_stock, "max_price_ratio": req.max_price_ratio}
+            "max_increase_pct": req.max_increase_pct, "undercut_pct": req.undercut_pct, "exclude_out_of_stock": req.exclude_out_of_stock, "max_price_ratio": req.max_price_ratio, "require_known_size": req.require_known_size}
 
     @app.post("/api/analyses", status_code=202)
     def create_analysis_endpoint(req: AnalysisRequest) -> dict:

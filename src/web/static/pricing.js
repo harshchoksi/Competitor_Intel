@@ -157,7 +157,7 @@ function productCard(it) {
       h("td", { style: "white-space:normal" }, h("b", {}, e.competitor_name),
         h("div", { class: "ct-title" }, safeUrl(e.url) ? h("a", { href: e.url, target: "_blank", rel: "noopener noreferrer" }, e.title) : e.title),
         h("small", {}, [e.size, `match ${Math.round(e.confidence * 100)}%`, e.size_adjusted ? "scaled to your pack size" : null].filter(Boolean).join(" · ")),
-        e.ignored ? h("small", { class: "ignnote" }, `Ignored: ${e.ratio}× different from your price (probably a different pack size or product)`) : null),
+        e.ignored ? h("small", { class: "ignnote" }, `Not used in the average: ${e.ignored_reason || "prices too far apart"}`) : null),
       h("td", { class: "num" }, h("b", {}, money(e.adjusted_price)),
         e.size_adjusted ? h("small", { style: "display:block" }, `listed ${money(e.price)}`) : null,
         e.compare_at && e.compare_at > e.price ? h("small", { style: "display:block" }, h("s", {}, money(e.compare_at)), ` ${e.discount_pct}% off`) : null,
@@ -190,10 +190,10 @@ function suspectCard(r) {
     h("td", { style: "white-space:normal" }, safeUrl(x.url) ? h("a", { href: x.url, target: "_blank", rel: "noopener noreferrer" }, x.title) : x.title, h("small", { style: "display:block" }, x.size || "size not stated")),
     h("td", { class: "num" }, money(x.price)),
     h("td", { style: "white-space:normal" }, h("b", {}, x.competitor_name), h("div", { class: "ct-title" }, safeUrl(x.comp_url) ? h("a", { href: x.comp_url, target: "_blank", rel: "noopener noreferrer" }, x.comp_title) : x.comp_title), h("small", {}, x.comp_size || "size not stated")),
-    h("td", { class: "num" }, money(x.comp_adjusted)), h("td", { class: "num" }, h("span", { class: "chip warning" }, x.ratio + "×")))));
-  return h("div", { class: "card" }, h("h2", {}, `Matches ignored because prices were far apart (${list.length})`),
-    h("p", { class: "note" }, "These looked like the same product by name, but the prices differ by more than 3×, which almost always means a different pack size (single can vs 24-pack) or a different product. They are NOT used in the averages or recommendations. Open the links to check."),
-    h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Your product", "Your price", "Competitor product", "Their price", "Gap"].map((x, i) => h("th", { class: i === 1 || i === 3 || i === 4 ? "num" : "" }, x)))), body)));
+    h("td", { class: "num" }, money(x.comp_adjusted)), h("td", { style: "white-space:normal" }, h("span", { class: "chip warning" }, x.ratio + "×"), h("small", { style: "display:block" }, x.reason || "")))));
+  return h("div", { class: "card" }, h("h2", {}, `Matches not used in recommendations (${list.length})`),
+    h("p", { class: "note" }, "These looked like the same product by name, but we could not be sure they are the same pack size: either the size is stated on only one site (e.g. “Tomato Vine 1kg” vs “Tomato Vine”), or the prices are so far apart that it is probably a different pack size (single can vs 24-pack). They are NOT used in the averages. Open the links to check; you can relax this in Options."),
+    h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Your product", "Your price", "Competitor product", "Their price", "Gap and reason"].map((x, i) => h("th", { class: i === 1 || i === 3 ? "num" : "" }, x)))), body)));
 }
 
 // Where the time went (handy when a hosted run feels slow)

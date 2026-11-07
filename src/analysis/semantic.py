@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 from rapidfuzz import fuzz
 
-from src.analysis.quantity import Quantity, compare_quantities, parse_quantity, strip_quantities
+from src.analysis.quantity import Quantity, compare_quantities, product_quantity, strip_quantities
 from src.analysis.taxonomy import categories_compatible, infer_product_type
 from src.scrapers.base import ProductRecord
 
@@ -277,7 +277,7 @@ def build_profiles(products: Sequence[ProductRecord]) -> list[Profile]:
         out.append(Profile(
             idx=i, title=p.title, prepared=prepared, tokens=tokens, token_set=frozenset(tokens), text=" ".join(tokens), brand=bn, brand_in_title=in_title,
             gtin=norm_gtin(p.gtin), sku=norm_sku(p.sku) or norm_sku(p.mpn), models=model_tokens(stripped), specs=fixed_spec_tokens(stripped),
-            qty=parse_quantity(p.title), attrs=extract_attrs(prepared), ptype=infer_product_type(p), category_raw=p.category,
+            qty=product_quantity(p), attrs=extract_attrs(prepared), ptype=infer_product_type(p), category_raw=p.category,
         ))
     return out
 

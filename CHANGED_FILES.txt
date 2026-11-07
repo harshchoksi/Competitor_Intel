@@ -45,3 +45,11 @@ Update 4 - quickmart / failing sites / recent cards / alerts:
   src/web/static/app.js, style.css   recent analyses as status cards (no "(done)" text)
   scripts/test_alerts.py        NEW  test email / Telegram settings;  README.md: Alerts setup guide
   tests/test_scrape_robustness.py (+8), scripts/ui_smoke.js (31 checks)
+
+Update 5 - pack sizes stated outside the title (the "Tomato 1kg vs Tomato per 500 GR" +171% bug):
+  src/analysis/quantity.py      product_quantity(): title, then variant/attribute size, then description cue, then shipping weight (weak); "per kg" wording
+  src/scrapers/base.py, shopify.py, woocommerce.py, jsonld.py   capture size_hint / weight_grams from the variant that the price comes from, Woo attributes, schema.org size/weight
+  src/analysis/pricing.py       matches with a size on only one side (or no size and far-apart prices) are not averaged; reasons recorded; option require_known_size
+  src/analysis/semantic.py      matching uses the product-level size
+  src/web/app.py, jobs.py, static/index.html, app.js, pricing.js   "Only compare products with a known pack size" option; reasons shown on cards and in the Data quality table
+  tests/test_pack_sizes.py      NEW (11 tests)

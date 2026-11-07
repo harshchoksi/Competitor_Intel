@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from loguru import logger
 from lxml import etree
 
+from src.analysis.quantity import pick_size_hint
 from src.scrapers.base import BaseScraper, ProductRecord, ScrapeError, parse_price, valid_compare_at
 from src.scrapers.heuristics import embedded_json_products, html_heuristic_product
 
@@ -194,6 +195,17 @@ def _og_products(html: str, url: str, currency: str) -> list[ProductRecord]:
                           in_stock=in_stock, low_stock=low, is_preorder=pre, source_method="og_meta")]
 
 
+_UNIT_CODES = {"KGM": "kg", "GRM": "g", "LBR": "lb", "ONZ": "oz", "LTR": "l", "MLT": "ml", "CLT": "cl"}
+
+
+def _weight_text(w) -> str | None:
+    """schema.org weight / QuantitativeValue -> '500 g'."""
+    if isinstance(w, dict):
+        value, unit = w.get("value"), _text(w.get("unitCode")) or _text(w.get("unitText")) or ""
+        return f"{value} {_UNIT_CODES.get(unit.upper(), unit)}".strip() if value not in (None, "") else None
+    return _text(w)
+
+
 def _node_to_record(node: dict, page_url: str, default_currency: str) -> ProductRecord | None:
     title = _text(node.get("name"))
     if not title:
@@ -209,7 +221,9 @@ def _node_to_record(node: dict, page_url: str, default_currency: str) -> Product
     except (TypeError, ValueError):
         review_count = None
     product_url = _text(node.get("url")) or page_url
+    size_hint = pick_size_hint([_text(node.get("size")), _weight_text(node.get("weight"))])
     return ProductRecord(
+        size_hint=size_hint,
         external_id=sku or product_url,
         url=urljoin(page_url, product_url),
         title=title,
